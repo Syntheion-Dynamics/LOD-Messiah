@@ -389,7 +389,8 @@ export function assetStem(assetPath, inputRoot) {
     rel = basename(abs);
   }
   const noExt = rel.replace(/\.(glb|gltf|obj|fbx)$/i, '');
-  return noExt.replace(/[\\/]+/g, '__') || 'asset';
+  // Nested folders under output (Kit/Asset), not flat Kit__Asset names
+  return noExt.replace(/\\/g, '/').replace(/\/+/g, '/') || 'asset';
 }
 
 export function makeWorkDir(baseOut) {

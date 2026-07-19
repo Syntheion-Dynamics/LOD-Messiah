@@ -9,7 +9,7 @@
 
 | Priorita | Úkol | Kde | ~čas |
 |---|---|---|---|
-| P0 | Convert Office_Plaza `--no-ktx2 --no-impostor` | TOOL | 15–40 min |
+| P0 | Convert Office_Plaza `--no-ktx2 --no-impostor --max-texture 2048` | TOOL | 10–25 min |
 | P0 | Zkopírovat `output/Office_Plaza/` → engine `Assets/…` + scéna → `lod0.glb` | ručně / ty | 10 min |
 | P0 | `CURSOR_TASK_lod_config_ui.md` (HUD + Force LOD + lod_settings.json) | engine | 1–2 h |
 | P1 | Ověřit v editoru: Force LOD 0/1/2 + auto při oddálení | ty + Claude review | 30–60 min |
@@ -26,8 +26,10 @@
 
 ```bash
 cd "c:\Users\yukit\Downloads\TOOL"
-npm run convert -- --input "Kitbash Assets/Manhattan/Office_Plaza.glb" --output ./output --no-impostor --no-ktx2
+npm run convert -- --input "Kitbash Assets/Manhattan/Office_Plaza.glb" --output ./output --no-impostor --no-ktx2 --max-texture 2048
 ```
+
+Nebo dvakrát klikni / spusť `convert-kitbash.bat` (stejné flagy).
 
 Pak celou složku `output/Office_Plaza/` (minimálně `lod0.glb`, `lod1.glb`, `lod2.glb`, textury uvnitř lod0) zkopíruj do engine Assets a ve scéně odkaž **jen** `lod0.glb`.
 
@@ -54,7 +56,7 @@ To je **engine UI** (ne TOOL). Až doběhne → Claude review → pípni.
 
 ## Pořadí „za 8 hodin“ (checklist)
 
-1. [ ] TOOL convert Office_Plaza (`--no-ktx2 --no-impostor`)
+1. [ ] TOOL convert Office_Plaza (`--no-ktx2 --no-impostor --max-texture 2048`)
 2. [ ] Copy do `Assets/` + scéna odkazuje `lod0.glb`
 3. [ ] Cursor: lod_settings + HUD + Force LOD (task výše)
 4. [ ] Otevřít editor: vidět LOD: x/y/z v HUD, Force LOD 2 zjednoduší model

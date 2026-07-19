@@ -10,6 +10,8 @@ npm-debug.log*
 # Cook outputs (regenerate with npm run convert)
 output/
 gallery/_cache/
+_test_*/
+_uri_test*/
 
 # Source KitBash / high-poly libraries — DO NOT commit (license + size)
 Kitbash Assets/

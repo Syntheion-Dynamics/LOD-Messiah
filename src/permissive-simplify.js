@@ -9,10 +9,10 @@ const VERTEX_PROTECT = 2;
  * Does NOT weld-average UVs — Protects UV discontinuities at shared positions.
  *
  * @param {import('@gltf-transform/core').Document} document
- * @param {{ ratio: number, error?: number, useSloppy?: boolean }} options
+ * @param {{ ratio: number, error?: number, pruneError?: number, protectUv?: boolean }} options
  */
 export async function permissiveSimplify(document, options) {
-  const { ratio, error = 0.01, useSloppy = false } = options;
+  const { ratio, error = 0.01, pruneError = 0.01, protectUv = true } = options;
   await MeshoptSimplifier.ready;
 
   const logger = document.getLogger();
@@ -25,7 +25,7 @@ export async function permissiveSimplify(document, options) {
       if (prim.getMode() !== TRIANGLES) continue;
       const before = countTris(prim);
       srcTris += before;
-      simplifyPrimitive(document, prim, ratio, error, useSloppy);
+      simplifyPrimitive(document, prim, ratio, error, pruneError, protectUv);
       const after = countTris(prim);
       dstTris += after;
       primCount += 1;
@@ -51,7 +51,7 @@ function countTris(prim) {
  * @param {import('@gltf-transform/core').Document} document
  * @param {import('@gltf-transform/core').Primitive} prim
  */
-function simplifyPrimitive(document, prim, ratio, error, useSloppy) {
+function simplifyPrimitive(document, prim, ratio, error, pruneError, protectUv = true) {
   const position = prim.getAttribute('POSITION');
   const srcIndices = prim.getIndices();
   if (!position || !srcIndices) return;
@@ -84,7 +84,9 @@ function simplifyPrimitive(document, prim, ratio, error, useSloppy) {
   // Position remap (identical positions) → Protect UV discontinuities
   const posRemap = generatePositionRemap(posArray, vertCount);
   const locks = new Uint8Array(vertCount);
-  if (uvArray) {
+  // protectUv=false (coarse LODs): UV seams may collapse — mild texture
+  // smearing at distance beats hitting the ~35% seam-lock topology floor.
+  if (uvArray && protectUv) {
     for (let i = 0; i < vertCount; i++) {
       const r = posRemap[i];
       if (r === i) continue;
@@ -126,49 +128,58 @@ function simplifyPrimitive(document, prim, ratio, error, useSloppy) {
     }
   }
 
-  const target = Math.max(3, Math.floor((ratio * idxArray.length) / 3) * 3);
-  const flags = /** @type {any} */ (['Permissive', 'Prune']);
+  // Prune is intentionally NOT passed to simplify: inside simplify it shares
+  // target_error as its threshold, so coarse LODs (error 0.04+) delete whole
+  // building components. Prune separately with a small fixed threshold instead.
+  const flags = /** @type {any} */ (['Permissive']);
 
-  let dstIndices = null;
-
-  if (useSloppy && typeof MeshoptSimplifier.simplifySloppy === 'function') {
-    const [sloppy] = MeshoptSimplifier.simplifySloppy(
+  let workIdx = idxArray;
+  if (
+    pruneError > 0 &&
+    typeof MeshoptSimplifier.simplifyPrune === 'function'
+  ) {
+    const pruned = MeshoptSimplifier.simplifyPrune(
       idxArray,
       posArray,
       3,
+      Math.min(pruneError, error),
+    );
+    if (pruned && pruned.length >= 3) workIdx = pruned;
+  }
+
+  // Ratio applies to the original count; clamp so target never exceeds the
+  // (possibly pruned) working index buffer.
+  const target = Math.min(
+    Math.max(3, Math.floor((ratio * idxArray.length) / 3) * 3),
+    workIdx.length,
+  );
+
+  let dstIndices = null;
+
+  if (attrStride > 0 && typeof MeshoptSimplifier.simplifyWithAttributes === 'function') {
+    const [simplified] = MeshoptSimplifier.simplifyWithAttributes(
+      workIdx,
+      posArray,
+      3,
+      attributes,
+      attrStride,
+      weights,
       locks,
       target,
       error,
+      flags,
     );
-    if (sloppy && sloppy.length >= 3) dstIndices = sloppy;
-  }
-
-  if (!dstIndices || dstIndices.length < 3) {
-    if (attrStride > 0 && typeof MeshoptSimplifier.simplifyWithAttributes === 'function') {
-      const [simplified] = MeshoptSimplifier.simplifyWithAttributes(
-        idxArray,
-        posArray,
-        3,
-        attributes,
-        attrStride,
-        weights,
-        locks,
-        target,
-        error,
-        flags,
-      );
-      dstIndices = simplified;
-    } else {
-      const [simplified] = MeshoptSimplifier.simplify(
-        idxArray,
-        posArray,
-        3,
-        target,
-        error,
-        flags,
-      );
-      dstIndices = simplified;
-    }
+    dstIndices = simplified;
+  } else {
+    const [simplified] = MeshoptSimplifier.simplify(
+      workIdx,
+      posArray,
+      3,
+      target,
+      error,
+      flags,
+    );
+    dstIndices = simplified;
   }
 
   if (!dstIndices || dstIndices.length < 3) {

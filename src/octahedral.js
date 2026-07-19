@@ -22,7 +22,8 @@ import { ROOT } from './convert.js';
  * @param {object} options
  * @param {string} options.inputGlb
  * @param {string} options.outputGlb
- * @param {string} options.outDir
+ * @param {string} options.outDir final outputs (atlas, preview)
+ * @param {string} [options.stageDir] staging for _source/_bake (defaults to outDir)
  * @param {number} [options.atlasSize] atlas edge px (default 4096)
  * @param {number} [options.frames] grid size (default 12 → 144 views)
  * @param {boolean} [options.hemi] hemi-octahedron for buildings (default true)
@@ -32,12 +33,14 @@ export async function generateOctahedralImpostor(options) {
     inputGlb,
     outputGlb,
     outDir,
+    stageDir = outDir,
     atlasSize = 4096,
     frames = 12,
     hemi = true,
   } = options;
 
   mkdirSync(outDir, { recursive: true });
+  mkdirSync(stageDir, { recursive: true });
   mkdirSync(dirname(outputGlb), { recursive: true });
 
   let puppeteer;
@@ -52,11 +55,12 @@ export async function generateOctahedralImpostor(options) {
     throw new Error('three package missing — npm install three');
   }
 
-  const stagedGlb = join(outDir, '_source.glb');
+  const stagedGlb = join(stageDir, '_source.glb');
+  const bakeHtml = join(stageDir, '_bake.html');
   copyFileSync(inputGlb, stagedGlb);
 
   const html = buildBakerHtml({ atlasSize, frames, hemi });
-  writeFileSync(join(outDir, '_bake.html'), html);
+  writeFileSync(bakeHtml, html);
 
   const mime = {
     '.html': 'text/html',
@@ -72,7 +76,7 @@ export async function generateOctahedralImpostor(options) {
       const url = new URL(req.url || '/', 'http://127.0.0.1');
       let filePath;
       if (url.pathname === '/' || url.pathname === '/index.html') {
-        filePath = join(outDir, '_bake.html');
+        filePath = bakeHtml;
       } else if (url.pathname === '/model.glb') {
         filePath = stagedGlb;
       } else if (url.pathname.startsWith('/vendor/three/')) {
@@ -105,8 +109,8 @@ export async function generateOctahedralImpostor(options) {
   const browser = await puppeteer.launch({
     headless: true,
     args: [
-      '--use-gl=angle',
       '--enable-webgl',
+      '--use-gl=swiftshader',
       '--ignore-gpu-blocklist',
       '--no-sandbox',
       '--disable-web-security',
@@ -181,15 +185,6 @@ export async function generateOctahedralImpostor(options) {
       meta,
     });
 
-    // Cleanup staging
-    try {
-      rmSync(stagedGlb, { force: true });
-      rmSync(join(outDir, '_bake.html'), { force: true });
-    } catch {
-      // ignore
-    }
-
-    // Write self-contained preview next to outputs
     writePreviewHtml(outDir, meta);
 
     return {
@@ -203,6 +198,12 @@ export async function generateOctahedralImpostor(options) {
       radius: data.radius,
     };
   } finally {
+    try {
+      rmSync(stagedGlb, { force: true });
+      rmSync(bakeHtml, { force: true });
+    } catch {
+      // ignore
+    }
     await browser.close();
     await new Promise((resolve) => server.close(resolve));
   }

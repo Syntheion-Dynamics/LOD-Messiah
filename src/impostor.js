@@ -28,6 +28,7 @@ import { generateOctahedralImpostor } from './octahedral.js';
  * @param {'octahedral'|'box'} [options.mode]
  * @param {number} [options.frames]
  * @param {string} [options.outDir]
+ * @param {string} [options.stageDir]
  */
 export async function generateImpostor(options) {
   const mode = options.mode || 'octahedral';
@@ -41,6 +42,7 @@ export async function generateImpostor(options) {
       inputGlb: options.inputGlb,
       outputGlb: options.outputGlb,
       outDir,
+      stageDir: options.stageDir || outDir,
       atlasSize: options.resolution || 4096,
       frames: options.frames || 12,
       hemi: true,

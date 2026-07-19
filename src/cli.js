@@ -31,7 +31,10 @@ Multi-kit:
   --impostor-res N        Atlas edge px (default 4096)
   --impostor-frames N     Grid size (default 12)
   --no-impostor
-  --max-texture N         Extra texture cap
+  --max-texture N         Cap basecolor/emissive; normal/ORM capped at 1024
+  --pack                  Also write legacy pack.glb (off by default)
+  --shared-textures       Kit _textures/ + external URIs (engine must support!)
+  --no-shared-textures    Embed textures in lod0 (DEFAULT — engine-safe)
   --blender / --toktx     Tool paths
   --keep-work
 
@@ -52,7 +55,8 @@ function parseArgs(argv) {
     bake: false,
     bakeRes: 2048,
     maxTexture: null,
-    pack: true,
+    pack: false,
+    sharedTextures: false,
     blender: null,
     gltfpack: null,
     toktx: null,
@@ -156,8 +160,14 @@ function parseArgs(argv) {
       case '--max-texture':
         args.maxTexture = Number(next());
         break;
+      case '--pack':
+        args.pack = true;
+        break;
       case '--no-pack':
         args.pack = false;
+        break;
+      case '--no-shared-textures':
+        args.sharedTextures = false;
         break;
       case '--blender':
         args.blender = next();
@@ -193,6 +203,7 @@ function buildOptions(args, inputRoot, outputDir) {
     bakeRes: args.bakeRes,
     maxTexture: args.maxTexture,
     pack: args.pack,
+    sharedTextures: args.sharedTextures,
     blender: args.blender,
     gltfpack: args.gltfpack,
     toktx: args.toktx,

@@ -1,5 +1,14 @@
-import { mkdirSync, writeFileSync, rmSync, existsSync, copyFileSync } from 'node:fs';
-import { join as pathJoin } from 'node:path';
+import {
+  mkdirSync,
+  writeFileSync,
+  readFileSync,
+  rmSync,
+  existsSync,
+  copyFileSync,
+  readdirSync,
+} from 'node:fs';
+import { join as pathJoin, relative, basename, dirname } from 'node:path';
+import { createHash } from 'node:crypto';
 import { NodeIO } from '@gltf-transform/core';
 import { ALL_EXTENSIONS } from '@gltf-transform/extensions';
 import {
@@ -8,7 +17,6 @@ import {
   prune,
   flatten,
   join,
-  textureCompress,
 } from '@gltf-transform/functions';
 import { MeshoptSimplifier, MeshoptEncoder } from 'meshoptimizer';
 import sharp from 'sharp';
@@ -32,6 +40,11 @@ import {
   assessHealth,
 } from './stats.js';
 
+/** Normal maps — biggest VRAM eaters; 1024 after BC7 is enough on buildings. */
+const TEX_CAP_NORMAL = 1024;
+/** Metallic-roughness / occlusion. */
+const TEX_CAP_ORM = 1024;
+
 /**
  * @typedef {object} PipelineOptions
  * @property {string} input
@@ -43,6 +56,7 @@ import {
  * @property {number} bakeRes
  * @property {number|null} maxTexture
  * @property {boolean} pack
+ * @property {boolean} [sharedTextures]
  * @property {string|null} blender
  * @property {string|null} gltfpack
  * @property {string|null} [toktx]
@@ -59,10 +73,15 @@ import {
 
 export async function processAsset(assetPath, options) {
   const stem = assetStem(assetPath, options.input);
-  const outDir = pathJoin(options.output, stem);
+  const outDir = pathJoin(options.output, ...stem.split('/').filter(Boolean));
   mkdirSync(outDir, { recursive: true });
 
   const workDir = makeWorkDir(outDir);
+  // Embedded is the engine-safe default; external `_textures/` URIs are opt-in
+  // until the engine loader supports glTF external images.
+  const sharedTextures = options.sharedTextures === true;
+  const texturesDir = pathJoin(options.output, '_textures');
+
   console.log(`\n→ Processing: ${assetPath}`);
   console.log(`  work dir : ${workDir}`);
   console.log(`  output   : ${outDir}`);
@@ -128,22 +147,39 @@ export async function processAsset(assetPath, options) {
     glbPath = mergedGlb;
     sourceDoc = await io.read(glbPath);
 
-    // Optional texture cap
+    // Optional texture cap — per material slot (normal/ORM stricter than basecolor)
     if (options.maxTexture) {
-      console.log(`  textures : resize max ${options.maxTexture}px`);
-      await sourceDoc.transform(
-        textureCompress({
-          encoder: sharp,
-          resize: [options.maxTexture, options.maxTexture],
-        }),
+      const r = await resizeTexturesSafe(sourceDoc, options.maxTexture);
+      console.log(
+        `  textures : resize base≤${options.maxTexture} normal/ORM≤${TEX_CAP_NORMAL} — ${r.resized} ok, ${r.skipped} skip, ${r.failed} fail`,
       );
       await io.write(glbPath, sourceDoc);
       sourceDoc = await io.read(glbPath);
     }
 
-    // Impostor MUST bake from PNG/JPEG textures — Puppeteer/Three has no KTX2 transcoder.
-    // Keep a pre-KTX2 snapshot for the octahedral baker.
-    const impostorSourceGlb = glbPath;
+    // Working copy always keeps textures embedded (LOD + impostor need that).
+    // Public lod0/default get external URIs into kit `_textures/` when sharedTextures.
+    const embeddedGlb = pathJoin(workDir, 'embedded.glb');
+    await io.write(embeddedGlb, sourceDoc);
+    glbPath = embeddedGlb;
+
+    // Fix 5: full-quality model before decimation
+    const defaultPath = pathJoin(outDir, 'default.glb');
+    let sharedTexStats = null;
+    if (sharedTextures) {
+      const defDoc = await io.read(embeddedGlb);
+      sharedTexStats = await externalizeTextures(defDoc, texturesDir, outDir);
+      console.log(
+        `  textures : shared ${sharedTexStats.written} new, ${sharedTexStats.reused} reused → ${texturesDir}`,
+      );
+      await writeGlbPreservingExternalImages(io, defDoc, defaultPath, workDir);
+    } else {
+      await io.write(defaultPath, sourceDoc);
+    }
+    console.log(`  default  : ${defaultPath} (${fileSizeBytes(defaultPath)} bytes)`);
+
+    // Impostor MUST bake from PNG/JPEG — Puppeteer has no KTX2 transcoder.
+    const impostorSourceGlb = embeddedGlb;
 
     // 3) KTX2 once on shared textures (before LOD fork)
     if (options.ktx2 !== false) {
@@ -167,7 +203,7 @@ export async function processAsset(assetPath, options) {
       `  geometry: ${beforeGeom.triangles.toLocaleString()} tris after join (${beforeRaw.triangles.toLocaleString()} instanced)`,
     );
 
-    // 4) LOD chain from KTX2 source (geometry only per LOD)
+    // 4) LOD chain
     const lodResults = [];
     const ratios = options.ratios?.length ? options.ratios : [0.5, 0.3, 0.1];
 
@@ -175,28 +211,27 @@ export async function processAsset(assetPath, options) {
       const ratio = ratios[i];
       const label = `LOD${i}`;
       const lodPath = pathJoin(outDir, `lod${i}.glb`);
+      // Ladder ×1/×2/×8 (0.01 / 0.02 / 0.08).
+      const errorMul = i >= 2 ? 8 : Math.pow(2, i);
       const lodError =
         Array.isArray(options.errors) && options.errors[i] != null
           ? options.errors[i]
-          : options.error * Math.pow(4, i);
-      const useSloppy = i >= 2 && ratio <= 0.12;
+          : options.error * errorMul;
+      const protectUv = i < 2;
+      const pruneError = i >= 2 ? 0.02 : 0.01;
 
       console.log(
-        `  ${label}: permissive simplify ratio=${ratio} error=${lodError}${
-          useSloppy ? ' (sloppy fallback ok)' : ''
-        }`,
+        `  ${label}: permissive simplify ratio=${ratio} error=${lodError} prune=${pruneError}${protectUv ? '' : ' (uv seams free)'}`,
       );
 
-      // Fresh copy of shared-texture source each LOD
       const doc = await io.read(glbPath);
-      // Join meshes for fewer draw calls; do NOT weld before simplify
-      // (weld would destroy UV discontinuities needed for Protect).
       await doc.transform(dedup(), flatten(), join());
 
       const simp = await permissiveSimplify(doc, {
         ratio,
         error: lodError,
-        useSloppy,
+        pruneError,
+        protectUv,
       });
       console.log(
         `  ${label}: tris ${simp.srcTris.toLocaleString()} → ${simp.dstTris.toLocaleString()}`,
@@ -208,17 +243,22 @@ export async function processAsset(assetPath, options) {
         prune(),
       );
 
-      // LOD1+ are geometry-only: textures live in lod0 and engines map materials
-      // by name/index (order is identical across LODs). Keeps lod1/2 at a few MB
-      // instead of duplicating the full texture set per LOD.
+      // LOD1+ geometry-only — textures live in lod0 / _textures
       if (i >= 1) {
         const strippedCount = stripTextures(doc);
         console.log(
           `  ${label}: stripped ${strippedCount} textures (geometry-only, material name stubs kept)`,
         );
+        await io.write(lodPath, doc);
+      } else if (sharedTextures) {
+        const embedLod0 = pathJoin(workDir, 'lod0_embedded.glb');
+        await io.write(embedLod0, doc);
+        const pubDoc = await io.read(embedLod0);
+        await externalizeTextures(pubDoc, texturesDir, outDir);
+        await writeGlbPreservingExternalImages(io, pubDoc, lodPath, workDir);
+      } else {
+        await io.write(lodPath, doc);
       }
-
-      await io.write(lodPath, doc);
 
       if (options.bake && i === 0) {
         console.log(`  ${label}: baking normals (${options.bakeRes}px)...`);
@@ -241,7 +281,7 @@ export async function processAsset(assetPath, options) {
         }
       }
 
-      const stats = collectStats(await io.read(lodPath), fileSizeBytes(lodPath));
+      const stats = collectStats(doc, fileSizeBytes(lodPath));
       const health = assessHealth(beforeGeom, stats, ratio);
       lodResults.push({
         label,
@@ -252,16 +292,17 @@ export async function processAsset(assetPath, options) {
         health,
         baked: false,
         reduction: reductionReport(beforeGeom, stats),
+        // Embedded lod0 for impostor bake (Puppeteer can't follow ../_textures)
+        embedPath: i === 0 ? pathJoin(workDir, 'lod0_embedded.glb') : null,
       });
     }
 
-    // 5) Impostor from merged (+ optional atlas) source
+    // 5) Impostor — stage into workDir; bake from embedded lod0 (not external)
     let impostorInfo = null;
     if (options.impostor) {
       const impostorPath = pathJoin(outDir, 'impostor.glb');
-      const facesDir = pathJoin(outDir, 'impostor_faces');
+      const facesDir = pathJoin(workDir, 'impostor_faces');
       const mode = options.impostorMode || 'octahedral';
-      // High-quality defaults: 4096/12 ≈ 341px per view (old 1024/8 = 128px looked PS1)
       let impostorRes =
         options.impostorRes || (mode === 'octahedral' ? 4096 : 512);
       let impostorFrames = options.impostorFrames || 12;
@@ -271,12 +312,19 @@ export async function processAsset(assetPath, options) {
           impostorFrames = 16;
         }
       }
+      const lod0Entry = lodResults.find((l) => l.level === 0);
+      const bakeFrom =
+        (lod0Entry?.embedPath && existsSync(lod0Entry.embedPath)
+          ? lod0Entry.embedPath
+          : null) ||
+        impostorSourceGlb;
       try {
         const result = await generateImpostor({
-          inputGlb: impostorSourceGlb,
+          inputGlb: bakeFrom,
           outputGlb: impostorPath,
           facesDir,
           outDir,
+          stageDir: workDir,
           resolution: impostorRes,
           includeTop: !!options.impostorTop,
           blender: options.blender,
@@ -293,6 +341,9 @@ export async function processAsset(assetPath, options) {
           mode,
           stats,
           atlasPath: result.atlasPath || null,
+          frames: result.frames || impostorFrames,
+          resolution: result.atlasSize || impostorRes,
+          hemi: true,
         };
         lodResults.push({
           label: 'IMPOSTOR',
@@ -314,13 +365,23 @@ export async function processAsset(assetPath, options) {
         console.log(`  impostor: OK (${mode}, ${stats.fileMB} MB)`);
       } catch (err) {
         console.warn(`  impostor: skipped — ${err.message}`);
+        if (err.stack) console.warn(err.stack);
       }
     }
 
+    // Fix 3: asset.json sidecar (pack.glb only if --pack)
+    const assetJsonPath = writeAssetJson(outDir, stem, lodResults, impostorInfo, {
+      default: 'default.glb',
+      sharedTextures,
+    });
+    console.log(`  asset    : ${assetJsonPath}`);
+
     let packPath = null;
-    if (options.pack !== false && lodResults.some((l) => !l.impostor)) {
+    if (options.pack === true && lodResults.some((l) => !l.impostor)) {
       packPath = await writePackGlb(io, lodResults, outDir, stem, impostorInfo);
     }
+
+    cleanupOutputJunk(outDir);
 
     printAssetReport(stem, beforeGeom, lodResults);
 
@@ -337,10 +398,15 @@ export async function processAsset(assetPath, options) {
         ktx2: options.ktx2 !== false,
         impostor: options.impostor,
         impostorMode: options.impostorMode || 'octahedral',
+        sharedTextures,
+        maxTexture: options.maxTexture,
       },
       beforeRaw,
       before: beforeGeom,
       materialMerge: mergeStats,
+      sharedTextures: sharedTexStats,
+      default: defaultPath,
+      asset: assetJsonPath,
       lods: lodResults.map((l) => ({
         label: l.label,
         level: l.level,
@@ -358,9 +424,8 @@ export async function processAsset(assetPath, options) {
     try {
       report.materialsBefore = rawDoc.getRoot().listMaterials().length;
       report.texturesBefore = rawDoc.getRoot().listTextures().length;
-      const lod0Doc = await io.read(lodResults[0].path);
-      report.materialsAfter = lod0Doc.getRoot().listMaterials().length;
-      report.texturesAfter = lod0Doc.getRoot().listTextures().length;
+      report.materialsAfter = mergeStats.materialsAfter;
+      report.texturesAfter = mergeStats.texturesAfter;
     } catch {
       report.materialsBefore = mergeStats.materialsBefore;
       report.materialsAfter = mergeStats.materialsAfter;
@@ -402,6 +467,243 @@ function stripTextures(doc) {
   return textures.length;
 }
 
+/**
+ * Cap per material slot: basecolor/emissive → maxBase; normal/ORM → 1024.
+ * Texture used in multiple slots gets the strictest (smallest) cap.
+ * @param {import('@gltf-transform/core').Document} doc
+ * @param {number} maxBase
+ */
+async function resizeTexturesSafe(doc, maxBase) {
+  const caps = buildTextureCaps(doc, maxBase);
+  let resized = 0;
+  let skipped = 0;
+  let failed = 0;
+
+  for (const texture of doc.getRoot().listTextures()) {
+    const src = texture.getImage();
+    if (!src || !src.byteLength) {
+      skipped++;
+      continue;
+    }
+    const maxEdge = caps.get(texture) ?? maxBase;
+    const input = Buffer.from(src);
+    try {
+      const meta = await sharp(input).metadata();
+      const w = meta.width || 0;
+      const h = meta.height || 0;
+      if (!w || !h) {
+        skipped++;
+        continue;
+      }
+      if (w <= maxEdge && h <= maxEdge) {
+        skipped++;
+        continue;
+      }
+
+      const out = await sharp(input)
+        .resize(maxEdge, maxEdge, { fit: 'inside', withoutEnlargement: true })
+        .png()
+        .toBuffer();
+
+      const check = await sharp(out).metadata();
+      if (!check.width || !check.height) {
+        failed++;
+        console.warn(
+          `  textures : keep original (bad resize) ${texture.getName() || '?'}`,
+        );
+        continue;
+      }
+
+      texture.setImage(out);
+      texture.setMimeType('image/png');
+      resized++;
+    } catch (err) {
+      failed++;
+      console.warn(
+        `  textures : keep original (${err.message}) ${texture.getName() || '?'}`,
+      );
+    }
+  }
+
+  return { resized, skipped, failed };
+}
+
+/**
+ * @param {import('@gltf-transform/core').Document} doc
+ * @param {number} maxBase
+ * @returns {Map<object, number>}
+ */
+function buildTextureCaps(doc, maxBase) {
+  const caps = new Map();
+  const setCap = (tex, cap) => {
+    if (!tex) return;
+    const prev = caps.get(tex);
+    caps.set(tex, prev == null ? cap : Math.min(prev, cap));
+  };
+
+  const normalCap = Math.min(maxBase, TEX_CAP_NORMAL);
+  const ormCap = Math.min(maxBase, TEX_CAP_ORM);
+
+  for (const mat of doc.getRoot().listMaterials()) {
+    setCap(mat.getBaseColorTexture(), maxBase);
+    setCap(mat.getEmissiveTexture(), maxBase);
+    setCap(mat.getNormalTexture(), normalCap);
+    setCap(mat.getMetallicRoughnessTexture(), ormCap);
+    setCap(mat.getOcclusionTexture(), ormCap);
+  }
+  return caps;
+}
+
+/**
+ * Extract textures to kit-level `_textures/<sha1>.png` and point URIs at them.
+ * @param {import('@gltf-transform/core').Document} doc
+ * @param {string} texturesDir
+ * @param {string} outDir asset folder (for relative URI)
+ */
+async function externalizeTextures(doc, texturesDir, outDir) {
+  mkdirSync(texturesDir, { recursive: true });
+  let written = 0;
+  let reused = 0;
+
+  for (const texture of doc.getRoot().listTextures()) {
+    const src = texture.getImage();
+    if (!src || !src.byteLength) continue;
+
+    let png = Buffer.from(src);
+    const mime = texture.getMimeType() || '';
+    if (!mime.includes('png')) {
+      png = await sharp(png).png().toBuffer();
+    }
+
+    const hash = createHash('sha1').update(png).digest('hex').slice(0, 16);
+    const fileName = `${hash}.png`;
+    const absPath = pathJoin(texturesDir, fileName);
+    if (!existsSync(absPath)) {
+      writeFileSync(absPath, png);
+      written++;
+    } else {
+      reused++;
+    }
+
+    const uri = relative(outDir, absPath).replace(/\\/g, '/');
+    texture.setURI(uri);
+    texture.setMimeType('image/png');
+    texture.setImage(png); // keep bytes so gltf write can decide; we strip on pack
+  }
+
+  return { written, reused };
+}
+
+/**
+ * gltf-transform's GLB writer re-embeds images. Write via .gltf (keeps URI) then
+ * pack a GLB whose JSON still references external PNGs.
+ */
+async function writeGlbPreservingExternalImages(io, doc, outGlb, workDir) {
+  const hasExternal = doc
+    .getRoot()
+    .listTextures()
+    .some((t) => {
+      const uri = t.getURI();
+      return uri && !uri.startsWith('data:');
+    });
+
+  if (!hasExternal) {
+    await io.write(outGlb, doc);
+    return;
+  }
+
+  const tmpGltf = pathJoin(workDir, `_ext_${basename(outGlb, '.glb')}.gltf`);
+  await io.write(tmpGltf, doc);
+  const gltf = JSON.parse(readFileSync(tmpGltf, 'utf8'));
+  const binUri = gltf.buffers?.[0]?.uri;
+  if (!binUri) {
+    await io.write(outGlb, doc);
+    return;
+  }
+  const binPath = pathJoin(dirname(tmpGltf), binUri);
+  const binBytes = readFileSync(binPath);
+  delete gltf.buffers[0].uri;
+  writeGlbFromJsonAndBin(gltf, binBytes, outGlb);
+
+  try {
+    rmSync(tmpGltf, { force: true });
+    rmSync(binPath, { force: true });
+  } catch {
+    // ignore
+  }
+}
+
+function writeGlbFromJsonAndBin(gltfJson, binBytes, outPath) {
+  let jsonStr = JSON.stringify(gltfJson);
+  while (Buffer.byteLength(jsonStr) % 4 !== 0) jsonStr += ' ';
+  const jsonBuf = Buffer.from(jsonStr);
+  const binPad = (4 - (binBytes.length % 4)) % 4;
+  const binBuf =
+    binPad === 0 ? binBytes : Buffer.concat([binBytes, Buffer.alloc(binPad)]);
+
+  const totalLen = 12 + 8 + jsonBuf.length + 8 + binBuf.length;
+  const out = Buffer.alloc(totalLen);
+  out.writeUInt32LE(0x46546c67, 0); // glTF
+  out.writeUInt32LE(2, 4);
+  out.writeUInt32LE(totalLen, 8);
+  out.writeUInt32LE(jsonBuf.length, 12);
+  out.writeUInt32LE(0x4e4f534a, 16); // JSON
+  jsonBuf.copy(out, 20);
+  const binOffset = 20 + jsonBuf.length;
+  out.writeUInt32LE(binBuf.length, binOffset);
+  out.writeUInt32LE(0x004e4942, binOffset + 4); // BIN
+  binBuf.copy(out, binOffset + 8);
+  writeFileSync(outPath, out);
+}
+
+function writeAssetJson(outDir, stem, lodResults, impostorInfo, extra = {}) {
+  const meshLods = lodResults.filter((l) => !l.impostor);
+  const asset = {
+    name: stem,
+    default: extra.default || 'default.glb',
+    lods: meshLods.map((l) => ({
+      level: l.level,
+      file: `lod${l.level}.glb`,
+      targetRatio: l.targetRatio,
+      triangles: l.stats?.triangles ?? null,
+    })),
+    impostor: impostorInfo
+      ? {
+          file: 'impostor.glb',
+          atlas: impostorInfo.atlasPath
+            ? basename(impostorInfo.atlasPath)
+            : 'impostor_atlas.png',
+          frames: impostorInfo.frames ?? null,
+          hemi: impostorInfo.hemi !== false,
+          resolution: impostorInfo.resolution ?? null,
+          mode: impostorInfo.mode || 'octahedral',
+        }
+      : null,
+    sharedTextures: extra.sharedTextures !== false,
+  };
+  const path = pathJoin(outDir, 'asset.json');
+  writeFileSync(path, JSON.stringify(asset, null, 2));
+  return path;
+}
+
+/** Remove leftover baker/debug junk from previous runs. */
+function cleanupOutputJunk(outDir) {
+  if (!existsSync(outDir)) return;
+  for (const name of readdirSync(outDir)) {
+    if (
+      name === '_source.glb' ||
+      name === '_bake.html' ||
+      name.startsWith('_bad_')
+    ) {
+      try {
+        rmSync(pathJoin(outDir, name), { force: true, recursive: true });
+      } catch {
+        // ignore
+      }
+    }
+  }
+}
+
 async function writePackGlb(io, lodResults, outDir, stem, impostorInfo = null) {
   const meshLod = lodResults.find((l) => !l.impostor) || lodResults[0];
   if (!meshLod) return null;
@@ -430,7 +732,7 @@ async function writePackGlb(io, lodResults, outDir, stem, impostorInfo = null) {
   };
   const packPath = pathJoin(outDir, 'pack.glb');
   await io.write(packPath, packDoc);
-  console.log(`  pack     : ${packPath}`);
+  console.log(`  pack     : ${packPath} (opt-in --pack)`);
   return packPath;
 }
 
@@ -445,6 +747,7 @@ export async function processBatch(assets, options) {
     } catch (err) {
       console.error(`\n✗ FAILED: ${asset}`);
       console.error(`  ${err.message}`);
+      if (err.stack) console.error(err.stack);
       failures.push({ asset, error: err.message });
     }
   }
