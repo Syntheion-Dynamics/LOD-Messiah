@@ -27,6 +27,9 @@ import { ROOT } from './convert.js';
  * @param {number} [options.atlasSize] atlas edge px (default 4096)
  * @param {number} [options.frames] grid size (default 12 → 144 views)
  * @param {boolean} [options.hemi] hemi-octahedron for buildings (default true)
+ * @param {number} [options.gutterPx] tile border dilate px (default 2, or 4 if tile ≤ 128)
+ * @param {string|null} [options.kitId]
+ * @param {string|null} [options.atlasId]
  */
 export async function generateOctahedralImpostor(options) {
   const {
@@ -37,7 +40,18 @@ export async function generateOctahedralImpostor(options) {
     atlasSize = 4096,
     frames = 12,
     hemi = true,
+    kitId = null,
+    atlasId = null,
   } = options;
+
+  const tileSize = Math.floor(atlasSize / frames);
+  const gutterPx =
+    options.gutterPx != null
+      ? Math.max(0, options.gutterPx | 0)
+      : tileSize <= 128
+        ? 4
+        : 2;
+  const alphaCutoff = 0.35;
 
   mkdirSync(outDir, { recursive: true });
   mkdirSync(stageDir, { recursive: true });
@@ -59,7 +73,7 @@ export async function generateOctahedralImpostor(options) {
   const bakeHtml = join(stageDir, '_bake.html');
   copyFileSync(inputGlb, stagedGlb);
 
-  const html = buildBakerHtml({ atlasSize, frames, hemi });
+  const html = buildBakerHtml({ atlasSize, frames, hemi, gutterPx });
   writeFileSync(bakeHtml, html);
 
   const mime = {
@@ -201,20 +215,32 @@ export async function generateOctahedralImpostor(options) {
     const atlasPath = join(outDir, 'impostor_atlas.png');
     writeFileSync(atlasPath, atlasBytes);
     console.log(
-      `  octahedral: atlas ${atlasSize}px / ${frames}×${frames} (${(atlasBytes.length / 1024).toFixed(0)} KB)`,
+      `  octahedral: atlas ${atlasSize}px / ${frames}×${frames} gutter=${gutterPx}px premult (${(atlasBytes.length / 1024).toFixed(0)} KB)`,
     );
 
     const meta = {
+      version: 1,
       type: 'octahedral',
       hemi: !!hemi,
       frames,
       atlasSize,
       atlas: 'impostor_atlas.png',
+      atlasOrigin: 'top-left',
+      atlasLayout: 'j0_top',
+      gutterPx: data.gutterPx ?? gutterPx,
+      alphaMode: 'premultiplied',
+      colorSpace: 'srgb',
+      mipPolicy: 'engine-from-png',
+      alphaCutoff,
+      transitionScreenSize: 0.07,
+      channelMap: { albedo: 'RGBA', alpha: 'coverage' },
+      kitId,
+      atlasId,
       center: data.center,
       radius: data.radius,
       size: data.size,
       generatedAt: new Date().toISOString(),
-      note: 'Open preview.html in a browser (or use runtime/octahedral-impostor.js). Blender cannot view-dependently sample this atlas.',
+      note: 'Open preview.html in a browser. Engine: 3-frame barycentric sample + UV clamp into tile (gutter-safe). Atlas RGB is premultiplied by A.',
     };
     const metaPath = join(outDir, 'impostor.json');
     writeFileSync(metaPath, JSON.stringify(meta, null, 2));
@@ -236,6 +262,8 @@ export async function generateOctahedralImpostor(options) {
       backend: 'octahedral-puppeteer',
       frames,
       atlasSize,
+      gutterPx: meta.gutterPx,
+      alphaMode: meta.alphaMode,
       center: data.center,
       radius: data.radius,
     };
@@ -251,7 +279,7 @@ export async function generateOctahedralImpostor(options) {
   }
 }
 
-function buildBakerHtml({ atlasSize, frames, hemi }) {
+function buildBakerHtml({ atlasSize, frames, hemi, gutterPx }) {
   return `<!DOCTYPE html>
 <html><head><meta charset="utf-8"/><title>octa bake</title></head>
 <body>
@@ -285,38 +313,140 @@ import { GLTFLoader } from 'three/addons/loaders/GLTFLoader.js';
 const atlasSize = ${atlasSize};
 const frames = ${frames};
 const hemi = ${hemi ? 'true' : 'false'};
+const gutterPx = ${gutterPx};
 const tileSize = Math.floor(atlasSize / frames);
+const innerSize = Math.max(1, tileSize - 2 * gutterPx);
+const ss = 2; // 2× supersample per view → sharper impostor
+const renderSize = tileSize * ss;
 
 const tileCanvas = document.getElementById('tile');
-tileCanvas.width = tileSize;
-tileCanvas.height = tileSize;
+tileCanvas.width = renderSize;
+tileCanvas.height = renderSize;
 const atlasCanvas = document.getElementById('atlas');
-const atlasCtx = atlasCanvas.getContext('2d');
+const atlasCtx = atlasCanvas.getContext('2d', { willReadFrequently: true });
+atlasCtx.imageSmoothingEnabled = true;
+atlasCtx.imageSmoothingQuality = 'high';
 atlasCtx.clearRect(0, 0, atlasSize, atlasSize);
 
 const renderer = new THREE.WebGLRenderer({
   canvas: tileCanvas, alpha: true, antialias: true, preserveDrawingBuffer: true,
   powerPreference: 'high-performance',
   failIfMajorPerformanceCaveat: false,
+  // Avoid bright edge fringes when blitting WebGL → 2D atlas canvas.
+  premultipliedAlpha: false,
 });
-renderer.setSize(tileSize, tileSize, false);
+renderer.setSize(renderSize, renderSize, false);
 renderer.setClearColor(0x000000, 0);
 renderer.outputColorSpace = THREE.SRGBColorSpace;
-renderer.toneMapping = THREE.ACESFilmicToneMapping;
-renderer.toneMappingExposure = 1.15;
+renderer.toneMapping = THREE.NoToneMapping;
+renderer.toneMappingExposure = 1;
 
 const scene = new THREE.Scene();
-scene.add(new THREE.AmbientLight(0xffffff, 0.75));
-scene.add(new THREE.HemisphereLight(0xddeeff, 0x445566, 0.55));
-const sun = new THREE.DirectionalLight(0xffffff, 1.45);
+scene.add(new THREE.AmbientLight(0xffffff, 1.1));
+scene.add(new THREE.HemisphereLight(0xf0f4ff, 0x889088, 0.95));
+const sun = new THREE.DirectionalLight(0xfff5e8, 1.7);
 sun.position.set(3, 6, 4);
 scene.add(sun);
-const fill = new THREE.DirectionalLight(0xfff2e0, 0.65);
+const fill = new THREE.DirectionalLight(0xd0e0ff, 0.75);
 fill.position.set(-4, 2, -2);
 scene.add(fill);
-const back = new THREE.DirectionalLight(0xffffff, 0.35);
+const back = new THREE.DirectionalLight(0xffffff, 0.4);
 back.position.set(0, 3, -5);
 scene.add(back);
+
+/**
+ * KitBash ships metal=1 + near-black GlassBlack. Without IBL that bakes as a silhouette.
+ * For impostors we want readable facade colors: dielectrics + sky-tinted glass.
+ */
+function prepareMaterialsForImpostorBake(root) {
+  root.traverse((obj) => {
+    if (!obj.isMesh || !obj.material) return;
+    const list = Array.isArray(obj.material) ? obj.material : [obj.material];
+    const next = list.map((mat) => {
+      if (!mat) return mat;
+      const name = (mat.name || obj.name || '').toLowerCase();
+      const isGlass = /glass|window|curtainwall/.test(name);
+
+      if (isGlass) {
+        // Replace pitch-black glass with a sky reflection stand-in (impostor readability).
+        return new THREE.MeshBasicMaterial({
+          color: new THREE.Color(0xb4d0e8),
+          map: null,
+          transparent: true,
+          opacity: 0.92,
+          side: mat.side ?? THREE.FrontSide,
+          depthWrite: true,
+          toneMapped: false,
+        });
+      }
+
+      const color = mat.color ? mat.color.clone() : new THREE.Color(0xffffff);
+      color.multiplyScalar(1.55);
+      const basic = new THREE.MeshBasicMaterial({
+        color,
+        map: mat.map || null,
+        alphaMap: mat.alphaMap || null,
+        transparent: !!mat.transparent,
+        opacity: mat.opacity ?? 1,
+        alphaTest: mat.alphaTest || 0.02,
+        side: mat.side ?? THREE.FrontSide,
+        depthWrite: mat.depthWrite !== false,
+        toneMapped: false,
+      });
+      if (basic.map) {
+        basic.map.colorSpace = THREE.SRGBColorSpace;
+        basic.map.needsUpdate = true;
+      }
+      return basic;
+    });
+    obj.material = Array.isArray(obj.material) ? next : next[0];
+  });
+}
+
+/** Expand opaque edge colors into transparent gutter ring (mip-bleed safe). */
+function dilateTile(tx, ty) {
+  if (gutterPx <= 0) return;
+  const img = atlasCtx.getImageData(tx, ty, tileSize, tileSize);
+  const w = tileSize;
+  const h = tileSize;
+  const data = img.data;
+  for (let pass = 0; pass < gutterPx; pass++) {
+    const copy = new Uint8ClampedArray(data);
+    for (let y = 0; y < h; y++) {
+      for (let x = 0; x < w; x++) {
+        const i = (y * w + x) * 4;
+        if (copy[i + 3] > 0) continue;
+        let bestA = 0, br = 0, bg = 0, bb = 0;
+        const nbs = [[x - 1, y], [x + 1, y], [x, y - 1], [x, y + 1]];
+        for (let n = 0; n < 4; n++) {
+          const nx = nbs[n][0], ny = nbs[n][1];
+          if (nx < 0 || ny < 0 || nx >= w || ny >= h) continue;
+          const ni = (ny * w + nx) * 4;
+          if (copy[ni + 3] > bestA) {
+            bestA = copy[ni + 3];
+            br = copy[ni]; bg = copy[ni + 1]; bb = copy[ni + 2];
+          }
+        }
+        if (bestA > 0) {
+          data[i] = br; data[i + 1] = bg; data[i + 2] = bb; data[i + 3] = bestA;
+        }
+      }
+    }
+  }
+  atlasCtx.putImageData(img, tx, ty);
+}
+
+function premultiplyAtlas() {
+  const img = atlasCtx.getImageData(0, 0, atlasSize, atlasSize);
+  const d = img.data;
+  for (let i = 0; i < d.length; i += 4) {
+    const a = d[i + 3] / 255;
+    d[i] = Math.round(d[i] * a);
+    d[i + 1] = Math.round(d[i + 1] * a);
+    d[i + 2] = Math.round(d[i + 2] * a);
+  }
+  atlasCtx.putImageData(img, 0, 0);
+}
 
 const camera = new THREE.OrthographicCamera(-1, 1, 1, -1, 0.05, 10000);
 
@@ -352,15 +482,19 @@ window.__OCTA_API__.error = null;
 try {
   console.log('[bake] loading model…');
   const gltf = await new GLTFLoader().loadAsync('/model.glb');
+  prepareMaterialsForImpostorBake(gltf.scene);
   scene.add(gltf.scene);
 
   const box = new THREE.Box3().setFromObject(gltf.scene);
   size = new THREE.Vector3();
   center = new THREE.Vector3();
   box.getSize(size);
-  box.getCenter(center);
-  radius = Math.max(size.x, size.y, size.z) * 0.5 * Math.SQRT2;
-  const ortho = radius * 2.05;
+  const sphere = new THREE.Sphere();
+  box.getBoundingSphere(sphere);
+  center.copy(sphere.center);
+  radius = Math.max(sphere.radius, 1e-4);
+  // Epic-style: ortho frustum = sphere diameter (tile fills bounds).
+  const ortho = radius * 2;
 
   camera.left = -ortho / 2;
   camera.right = ortho / 2;
@@ -370,7 +504,7 @@ try {
   camera.far = radius * 20;
   camera.updateProjectionMatrix();
 
-  console.log('[bake] ready frames', frames, 'tile', tileSize);
+  console.log('[bake] ready frames', frames, 'tile', tileSize, 'gutter', gutterPx, 'ss', ss, 'radius', radius.toFixed(3));
 
   window.__OCTA_API__.bakeRow = async function bakeRow(j) {
     for (let i = 0; i < frames; i++) {
@@ -387,7 +521,12 @@ try {
 
       const dx = i * tileSize;
       const dy = j * tileSize;
-      atlasCtx.drawImage(tileCanvas, dx, dy, tileSize, tileSize);
+      atlasCtx.clearRect(dx, dy, tileSize, tileSize);
+      atlasCtx.drawImage(
+        tileCanvas, 0, 0, renderSize, renderSize,
+        dx + gutterPx, dy + gutterPx, innerSize, innerSize,
+      );
+      dilateTile(dx, dy);
     }
     // Yield so Puppeteer / compositor can flush between rows
     await nextFrame();
@@ -395,6 +534,7 @@ try {
 
   window.__OCTA_API__.finish = function finish() {
     try {
+      premultiplyAtlas();
       return {
         ok: true,
         atlas: atlasCanvas.toDataURL('image/png'),
@@ -403,8 +543,10 @@ try {
         radius,
         frames,
         atlasSize,
+        gutterPx,
         hemi,
         atlasLayout: 'j0_top',
+        alphaMode: 'premultiplied',
       };
     } catch (err) {
       return { ok: false, error: String(err && err.message ? err.message : err) };
@@ -455,11 +597,13 @@ async function buildBillboardGlb({ outputGlb, center, radius, atlasBytes, meta }
     .setImage(atlasBytes)
     .setMimeType('image/png');
 
+  const cutoff =
+    typeof meta.alphaCutoff === 'number' ? meta.alphaCutoff : 0.35;
   const material = doc
     .createMaterial('OctaAtlasPreview')
     .setBaseColorTexture(texture)
     .setAlphaMode('MASK')
-    .setAlphaCutoff(0.35)
+    .setAlphaCutoff(cutoff)
     .setDoubleSided(true)
     .setMetallicFactor(0)
     .setRoughnessFactor(1);
@@ -510,10 +654,10 @@ function writePreviewHtml(outDir, meta) {
 </head>
 <body>
   <div id="hud">
-    <b>Octahedral impostor</b> (hemi=${meta.hemi}, ${meta.frames}×${meta.frames})<br/>
-    Otáčej myší — shader vybírá pohled z atlasu.<br/>
-    Blender tohle neumí; tento preview = engine chování.<br/>
-    Atlas: <a href="impostor_atlas.png" target="_blank">impostor_atlas.png</a>
+    <b>Octahedral impostor</b> (hemi=${meta.hemi}, ${meta.frames}×${meta.frames}, gutter=${meta.gutterPx ?? 0}px)<br/>
+    Otáčej myší — 3-frame barycentric blend z atlasu.<br/>
+    <b>Oddál kameru</b> (kolečko) — zblízka je impostor vždy pixelovaný; ve hře je na dálku.<br/>
+    Atlas: <a href="impostor_atlas.png" target="_blank">impostor_atlas.png</a> (${meta.alphaMode || 'straight'})
   </div>
   <canvas id="c"></canvas>
   <script type="importmap">
@@ -551,7 +695,11 @@ function writePreviewHtml(outDir, meta) {
   scene.add(grid);
 
   const loader = new THREE.TextureLoader();
-  const atlas = await loader.loadAsync('./impostor_atlas.png');
+  const bust = new URLSearchParams(location.search).get('t');
+  const atlasUrl = bust
+    ? \`./impostor_atlas.png?t=\${encodeURIComponent(bust)}\`
+    : './impostor_atlas.png';
+  const atlas = await loader.loadAsync(atlasUrl);
   atlas.colorSpace = THREE.SRGBColorSpace;
   // Must match baker: j=0 at TOP of PNG, V increases downward with j.
   atlas.flipY = false;
@@ -561,6 +709,9 @@ function writePreviewHtml(outDir, meta) {
 
   const frames = meta.frames;
   const hemi = meta.hemi;
+  const gutterPx = meta.gutterPx ?? 2;
+  const atlasSize = meta.atlasSize || atlas.image.width;
+  const alphaCutoff = typeof meta.alphaCutoff === 'number' ? meta.alphaCutoff : 0.35;
 
   const uniforms = {
     atlas: { value: atlas },
@@ -568,6 +719,9 @@ function writePreviewHtml(outDir, meta) {
     hemi: { value: hemi ? 1 : 0 },
     center: { value: new THREE.Vector3(c.x, c.y, c.z) },
     radius: { value: R },
+    gutterPx: { value: gutterPx },
+    atlasSize: { value: atlasSize },
+    alphaCutoff: { value: alphaCutoff },
   };
 
   const mat = new THREE.ShaderMaterial({
@@ -593,6 +747,9 @@ function writePreviewHtml(outDir, meta) {
       uniform float frames;
       uniform float hemi;
       uniform vec3 center;
+      uniform float gutterPx;
+      uniform float atlasSize;
+      uniform float alphaCutoff;
       varying vec2 vUv;
 
       vec2 octaEncode(vec3 n, float hemiMode) {
@@ -607,37 +764,50 @@ function writePreviewHtml(outDir, meta) {
         return clamp(f * 0.5 + 0.5, 0.0, 1.0);
       }
 
+      // Sample inside tile with gutter + half-texel inset (bilinear never crosses frames).
       // flipY=false, j=0 at top of PNG: feet at bottom of tile → 1-v inside cell
       vec4 sampleCell(vec2 cell, vec2 local) {
+        float tileUv = 1.0 / frames;
+        float pad = (gutterPx + 0.5) / max(atlasSize, 1.0);
+        float inner = max(tileUv - 2.0 * pad, 1.0 / max(atlasSize, 1.0));
+        vec2 lo = clamp(local, vec2(0.0), vec2(1.0));
         vec2 atlasUv = vec2(
-          (cell.x + local.x) / frames,
-          (cell.y + (1.0 - local.y)) / frames
+          cell.x * tileUv + pad + lo.x * inner,
+          cell.y * tileUv + pad + (1.0 - lo.y) * inner
         );
         return texture2D(atlas, atlasUv);
       }
 
       void main() {
-        // Bake camera sat on +viewDir; match that here
         vec3 viewDir = normalize(cameraPosition - center);
         vec2 gridUv = octaEncode(viewDir, hemi);
 
-        // Soft 2×2 blend between neighboring views (less "slideshow" pops)
+        // Brucks / UE: 3 nearest frames + barycentric weights
         vec2 g = gridUv * frames - 0.5;
         vec2 g0 = floor(g);
         vec2 f = fract(g);
-        vec2 c00 = clamp(g0, vec2(0.0), vec2(frames - 1.0));
-        vec2 c10 = clamp(g0 + vec2(1.0, 0.0), vec2(0.0), vec2(frames - 1.0));
-        vec2 c01 = clamp(g0 + vec2(0.0, 1.0), vec2(0.0), vec2(frames - 1.0));
-        vec2 c11 = clamp(g0 + vec2(1.0, 1.0), vec2(0.0), vec2(frames - 1.0));
+        vec2 lim = vec2(frames - 1.0);
+        vec2 c1, c2, c3;
+        vec3 w;
+        if (f.x + f.y < 1.0) {
+          c1 = clamp(g0, vec2(0.0), lim);
+          c2 = clamp(g0 + vec2(1.0, 0.0), vec2(0.0), lim);
+          c3 = clamp(g0 + vec2(0.0, 1.0), vec2(0.0), lim);
+          w = vec3(1.0 - f.x - f.y, f.x, f.y);
+        } else {
+          c1 = clamp(g0 + vec2(1.0, 1.0), vec2(0.0), lim);
+          c2 = clamp(g0 + vec2(1.0, 0.0), vec2(0.0), lim);
+          c3 = clamp(g0 + vec2(0.0, 1.0), vec2(0.0), lim);
+          w = vec3(f.x + f.y - 1.0, 1.0 - f.y, 1.0 - f.x);
+        }
 
         vec2 local = vUv;
-        vec4 s00 = sampleCell(c00, local);
-        vec4 s10 = sampleCell(c10, local);
-        vec4 s01 = sampleCell(c01, local);
-        vec4 s11 = sampleCell(c11, local);
-        vec4 color = mix(mix(s00, s10, f.x), mix(s01, s11, f.x), f.y);
+        vec4 color =
+          w.x * sampleCell(c1, local) +
+          w.y * sampleCell(c2, local) +
+          w.z * sampleCell(c3, local);
 
-        if (color.a < 0.35) discard;
+        if (color.a < alphaCutoff) discard;
         gl_FragColor = color;
       }
     \`,
