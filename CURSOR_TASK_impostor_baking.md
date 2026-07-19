@@ -1,3 +1,11 @@
+## Stav (2026-07-19 večer)
+
+**HOTOVÉ.** Pipeline peče z `lod0_embedded` (PNG), chyby jdou do `report.impostor` /
+`asset.json`, Puppeteer row-by-row + Angle/D3D11. Ověřeno:
+`coffee_shop_building`, `abandoned_building_polygraphenwerk_leipzig`, `free_london_skyscraper`.
+
+---
+
 # CURSOR TASK — dodělat impostor baking (STŘEDNÍ priorita)
 
 > **Kontext:** LOD pipeline (`lod0/1/2.glb`) funguje. Chybí spolehlivý **octahedral impostor

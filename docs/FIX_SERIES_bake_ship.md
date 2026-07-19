@@ -78,20 +78,15 @@ ne atlas per budova (ten sdílení zabíjí — viz vlastní research brief).
 - `"impostor": { file, atlas, frames, hemi, resolution }` — engine ho zatím nečte,
   ale až se ve Vulkanu napíše octahedral shader (engine task, ne TOOL), data už čekají.
 
-## P2 — skutečný texture bake (víkend, NE dnes)
+## P2 — skutečný texture bake (víkend)
 
-### 8. Atlas bake JEN pro LOD2 (+ impostor tier)
-- lod0/lod1: nechat tiling multi-material + sdílené textury (správně per research brief
-  — atlas per budova zabíjí sdílení a VRAM).
-- lod2: unikátní UV (xatlas) + zapéct výsledný vzhled do **jednoho 1024px atlasu**
-  per budova. Z dálky tiling detail nikdo nevidí; lod2 přestane záviset na lod0
-  materiálech → jednodušší streaming vzdálených bloků.
-- Tohle je odpověď na „lody s baknutými texturami": bake tam, kde dává smysl (dálka),
-  tiling tam, kde je kvalita (blízko).
+### 8. Atlas bake JEN pro LOD2 (+ impostor tier) — [x] implementováno
+- lod0/lod1: tiling multi-material.
+- lod2: watlas `TEXCOORD_1` + Blender bake → **1024px** atlas (`lod2_atlas/`), self-contained GLB.
+- QC gate + fallback na geometry-only. Flag: `--no-lod2-atlas` / `--lod2-atlas-res N`.
 
-### 9. `--atlas` (join-all Blender bake) — zrušit
-- Nespolehlivý, QC ho zamítá, a i kdyby fungoval, je to špatný cíl (viz 8).
-  Neopravovat, smazat cestu, míň kódu na údržbu.
+### 9. `--atlas` (join-all Blender bake) — [x] zrušeno
+- Pre-LOD join-all odstraněn; `--atlas` jen varuje. `--no-atlas` = `--no-lod2-atlas`.
 
 ## Pořadí exekuce dnes
 
@@ -99,10 +94,11 @@ ne atlas per budova (ten sdílení zabíjí — viz vlastní research brief).
 2. [x] Fix 5 (default.glb) — ~20 min
 3. [x] Ověřit externí URI v enginu (15 min test) → Fix 1 — ~1–2 h
 4. [x] Přecookovat Office_Plaza → zkopírovat do enginu → LOD přepínání ve hře
-5. [ ] Zítra: Fix 6+7 (impostor)
+5. [x] Zítra: Fix 6+7 (impostor) — bake z lod0_embedded, hlasité chyby, row-by-row Puppeteer, asset.json kontrakt
 
 ## Co se NEMĚNÍ
 
-- LOD kontrakt: `lod1/2.glb` geometry-only, stejné pořadí materiálů. Platí dál.
+- LOD kontrakt: `lod1.glb` geometry-only, stejné pořadí materiálů. Platí dál.
+- `lod2.glb` je **self-contained atlas** (P2), ne geometry-only — pokud bake selže, fallback geometry-only.
 - `--no-ktx2` pro engine (PNG→BC7 v texcache). Platí dál.
 - Zdrojové kity se nikdy nepřepisují.

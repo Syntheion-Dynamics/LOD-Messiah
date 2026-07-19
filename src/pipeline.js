@@ -26,12 +26,11 @@ import {
   assetStem,
   makeWorkDir,
 } from './convert.js';
-import { runAtlasBake } from './atlas.js';
-import { validateAtlasBake } from './atlas-qc.js';
 import { mergeMaterials } from './material-merge.js';
 import { compressTexturesKtx2 } from './ktx2.js';
 import { permissiveSimplify } from './permissive-simplify.js';
 import { generateImpostor } from './impostor.js';
+import { bakeLod2Atlas } from './lod2-atlas.js';
 import {
   collectStats,
   fileSizeBytes,
@@ -66,7 +65,8 @@ const TEX_CAP_ORM = 1024;
  * @property {number} impostorRes
  * @property {number} [impostorFrames]
  * @property {boolean} impostorTop
- * @property {boolean} atlas
+ * @property {boolean} [lod2Atlas] default true — bake unique UV + 1024 atlas on last LOD
+ * @property {number} [lod2AtlasRes]
  * @property {boolean} hero
  * @property {boolean} ktx2
  */
@@ -104,40 +104,10 @@ export async function processAsset(assetPath, options) {
     const rawDoc = await io.read(glbPath);
     const beforeRaw = collectStats(rawDoc, fileSizeBytes(glbPath));
 
-    // 1) Optional experimental atlas bake (QC-gated)
     let atlasUsed = false;
-    if (options.atlas) {
-      const atlasRes = options.hero ? 2048 : 1024;
-      const atlasGlb = pathJoin(workDir, 'atlas.glb');
-      const mapsDir = pathJoin(outDir, 'atlas_maps');
-      try {
-        runAtlasBake({
-          inputGlb: glbPath,
-          outputGlb: atlasGlb,
-          mapsDir,
-          resolution: atlasRes,
-          blender: options.blender,
-        });
-        const qc = await validateAtlasBake(atlasGlb, mapsDir);
-        if (qc.ok) {
-          glbPath = atlasGlb;
-          atlasUsed = true;
-          console.log(
-            `  atlas   : QC OK (luma ${qc.meanLuminance?.toFixed(3)}, uvArea ${qc.uvFaceAreaSum?.toFixed(3)})`,
-          );
-        } else {
-          console.warn(`  atlas   : QC REJECTED — ${qc.reason}`);
-          console.warn('  atlas   : continuing without atlas');
-        }
-      } catch (err) {
-        console.warn(`  atlas   : FAILED — ${err.message}`);
-        console.warn('  atlas   : continuing without atlas');
-      }
-    }
-
     let sourceDoc = await io.read(glbPath);
 
-    // 2) Material merge (no rebake) — always
+    // 1) Material merge (no rebake) — always; keeps tiling for lod0/lod1
     const mergeStats = await mergeMaterials(sourceDoc);
     console.log(
       `  materials: merge ${mergeStats.materialsBefore} → ${mergeStats.materialsAfter} mat | ${mergeStats.texturesBefore} → ${mergeStats.texturesAfter} tex (slots remapped ${mergeStats.merged})`,
@@ -243,20 +213,86 @@ export async function processAsset(assetPath, options) {
         prune(),
       );
 
-      // LOD1+ geometry-only — textures live in lod0 / _textures
-      if (i >= 1) {
+      const isLastLod = i === ratios.length - 1;
+      const wantLod2Atlas = isLastLod && i >= 1 && options.lod2Atlas !== false;
+      let lod2AtlasOk = false;
+
+      if (i === 0) {
+        // Always write PNG-capable lod0_embedded for impostor bake.
+        const embedLod0 = pathJoin(workDir, 'lod0_embedded.glb');
+        if (sharedTextures) {
+          await io.write(embedLod0, doc);
+          const pubDoc = await io.read(embedLod0);
+          await externalizeTextures(pubDoc, texturesDir, outDir);
+          await writeGlbPreservingExternalImages(io, pubDoc, lodPath, workDir);
+        } else {
+          await io.write(lodPath, doc);
+          await io.write(embedLod0, doc);
+        }
+        // Puppeteer has no KTX2 transcoder — re-simplify from PNG working copy.
+        if (options.ktx2 !== false) {
+          const pngDoc = await io.read(embeddedGlb);
+          await pngDoc.transform(dedup(), flatten(), join());
+          await permissiveSimplify(pngDoc, {
+            ratio,
+            error: lodError,
+            pruneError,
+            protectUv,
+          });
+          await MeshoptEncoder.ready;
+          await pngDoc.transform(
+            reorder({ encoder: MeshoptEncoder, target: 'performance' }),
+            prune(),
+          );
+          await io.write(embedLod0, pngDoc);
+          console.log(`  ${label}: impostor source = PNG lod0_embedded.glb`);
+        }
+      } else if (wantLod2Atlas) {
+        // P2: unique UV + single atlas — self-contained far LOD
+        try {
+          let bakeDoc = doc;
+          if (options.ktx2 !== false) {
+            bakeDoc = await io.read(embeddedGlb);
+            await bakeDoc.transform(dedup(), flatten(), join());
+            await permissiveSimplify(bakeDoc, {
+              ratio,
+              error: lodError,
+              pruneError,
+              protectUv,
+            });
+            await MeshoptEncoder.ready;
+            await bakeDoc.transform(
+              reorder({ encoder: MeshoptEncoder, target: 'performance' }),
+              prune(),
+            );
+          }
+          const atlasRes =
+            options.lod2AtlasRes ?? (options.hero ? 2048 : 1024);
+          await bakeLod2Atlas({
+            doc: bakeDoc,
+            io,
+            workDir,
+            outDir,
+            outputGlb: lodPath,
+            resolution: atlasRes,
+            blender: options.blender,
+          });
+          lod2AtlasOk = true;
+        } catch (err) {
+          console.warn(`  ${label}: atlas skipped — ${err.message}`);
+          if (err.stack) console.warn(err.stack);
+          const strippedCount = stripTextures(doc);
+          console.log(
+            `  ${label}: stripped ${strippedCount} textures (geometry-only fallback)`,
+          );
+          await io.write(lodPath, doc);
+        }
+      } else {
+        // LOD1 (and lod2 if --no-lod2-atlas): geometry-only stubs
         const strippedCount = stripTextures(doc);
         console.log(
           `  ${label}: stripped ${strippedCount} textures (geometry-only, material name stubs kept)`,
         );
-        await io.write(lodPath, doc);
-      } else if (sharedTextures) {
-        const embedLod0 = pathJoin(workDir, 'lod0_embedded.glb');
-        await io.write(embedLod0, doc);
-        const pubDoc = await io.read(embedLod0);
-        await externalizeTextures(pubDoc, texturesDir, outDir);
-        await writeGlbPreservingExternalImages(io, pubDoc, lodPath, workDir);
-      } else {
         await io.write(lodPath, doc);
       }
 
@@ -281,7 +317,8 @@ export async function processAsset(assetPath, options) {
         }
       }
 
-      const stats = collectStats(doc, fileSizeBytes(lodPath));
+      const statsDoc = lod2AtlasOk ? await io.read(lodPath) : doc;
+      const stats = collectStats(statsDoc, fileSizeBytes(lodPath));
       const health = assessHealth(beforeGeom, stats, ratio);
       lodResults.push({
         label,
@@ -290,11 +327,13 @@ export async function processAsset(assetPath, options) {
         path: lodPath,
         stats,
         health,
-        baked: false,
+        baked: lod2AtlasOk,
+        atlas: lod2AtlasOk,
         reduction: reductionReport(beforeGeom, stats),
         // Embedded lod0 for impostor bake (Puppeteer can't follow ../_textures)
         embedPath: i === 0 ? pathJoin(workDir, 'lod0_embedded.glb') : null,
       });
+      if (lod2AtlasOk) atlasUsed = true;
     }
 
     // 5) Impostor — stage into workDir; bake from embedded lod0 (not external)
@@ -317,7 +356,16 @@ export async function processAsset(assetPath, options) {
         (lod0Entry?.embedPath && existsSync(lod0Entry.embedPath)
           ? lod0Entry.embedPath
           : null) ||
+        (lod0Entry?.path && existsSync(lod0Entry.path) ? lod0Entry.path : null) ||
         impostorSourceGlb;
+      const bakeSrcLabel = bakeFrom === lod0Entry?.embedPath
+        ? 'lod0_embedded'
+        : bakeFrom === lod0Entry?.path
+          ? 'lod0'
+          : 'full embedded';
+      console.log(
+        `  impostor: baking from ${bakeSrcLabel} (${(fileSizeBytes(bakeFrom) / (1024 * 1024)).toFixed(1)} MB)`,
+      );
       try {
         const result = await generateImpostor({
           inputGlb: bakeFrom,
@@ -336,6 +384,7 @@ export async function processAsset(assetPath, options) {
           fileSizeBytes(impostorPath),
         );
         impostorInfo = {
+          ok: true,
           path: impostorPath,
           backend: result.backend,
           mode,
@@ -364,8 +413,10 @@ export async function processAsset(assetPath, options) {
         });
         console.log(`  impostor: OK (${mode}, ${stats.fileMB} MB)`);
       } catch (err) {
-        console.warn(`  impostor: skipped — ${err.message}`);
-        if (err.stack) console.warn(err.stack);
+        const reason = err?.message || String(err);
+        console.warn(`  impostor: FAILED — ${reason}`);
+        if (err?.stack) console.warn(err.stack);
+        impostorInfo = { ok: false, reason };
       }
     }
 
@@ -392,7 +443,7 @@ export async function processAsset(assetPath, options) {
       generatedAt: new Date().toISOString(),
       options: {
         ratios,
-        atlas: !!options.atlas,
+        lod2Atlas: options.lod2Atlas !== false,
         atlasUsed,
         hero: !!options.hero,
         ktx2: options.ktx2 !== false,
@@ -415,6 +466,7 @@ export async function processAsset(assetPath, options) {
         stats: l.stats,
         health: l.health,
         impostor: !!l.impostor,
+        atlas: !!l.atlas,
         reduction: l.reduction,
       })),
       impostor: impostorInfo,
@@ -658,6 +710,24 @@ function writeGlbFromJsonAndBin(gltfJson, binBytes, outPath) {
 
 function writeAssetJson(outDir, stem, lodResults, impostorInfo, extra = {}) {
   const meshLods = lodResults.filter((l) => !l.impostor);
+  let impostor = null;
+  if (impostorInfo) {
+    if (impostorInfo.ok === false) {
+      impostor = { ok: false, reason: impostorInfo.reason || 'unknown' };
+    } else {
+      impostor = {
+        ok: true,
+        file: 'impostor.glb',
+        atlas: impostorInfo.atlasPath
+          ? basename(impostorInfo.atlasPath)
+          : 'impostor_atlas.png',
+        frames: impostorInfo.frames ?? null,
+        hemi: impostorInfo.hemi !== false,
+        resolution: impostorInfo.resolution ?? null,
+        mode: impostorInfo.mode || 'octahedral',
+      };
+    }
+  }
   const asset = {
     name: stem,
     default: extra.default || 'default.glb',
@@ -666,19 +736,14 @@ function writeAssetJson(outDir, stem, lodResults, impostorInfo, extra = {}) {
       file: `lod${l.level}.glb`,
       targetRatio: l.targetRatio,
       triangles: l.stats?.triangles ?? null,
+      atlas: !!l.atlas,
+      ...(l.atlas
+        ? { maps: 'lod2_atlas/', note: 'self-contained PBR atlas (unique UV)' }
+        : l.level >= 1
+          ? { note: 'geometry-only; materials from lod0' }
+          : {}),
     })),
-    impostor: impostorInfo
-      ? {
-          file: 'impostor.glb',
-          atlas: impostorInfo.atlasPath
-            ? basename(impostorInfo.atlasPath)
-            : 'impostor_atlas.png',
-          frames: impostorInfo.frames ?? null,
-          hemi: impostorInfo.hemi !== false,
-          resolution: impostorInfo.resolution ?? null,
-          mode: impostorInfo.mode || 'octahedral',
-        }
-      : null,
+    impostor,
     sharedTextures: extra.sharedTextures !== false,
   };
   const path = pathJoin(outDir, 'asset.json');

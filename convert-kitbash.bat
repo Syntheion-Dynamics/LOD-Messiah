@@ -4,7 +4,8 @@ cd /d "%~dp0"
 
 echo ============================================
 echo  KitBash -^> Engine-Ready
-echo  LOD + max-texture 2048  (NO atlas/ktx2/impostor)
+echo  LOD + impostor + max-texture 2048
+echo  (NO atlas / ktx2)
 echo ============================================
 echo.
 
@@ -16,9 +17,10 @@ if "%INPUT%"=="" set INPUT=.\Kitbash Assets\Manhattan\Office_Plaza.glb
 echo Input: %INPUT%
 echo.
 
-call npm run convert -- --input "%INPUT%" --output ./output --no-impostor --no-ktx2 --max-texture 2048
+call npm run convert -- --input "%INPUT%" --output ./output --no-ktx2 --max-texture 2048 --impostor-res 2048 --impostor-frames 12
 
 echo.
 echo Hotovo. Vystup: output\
+echo   lod0/1/2.glb + default.glb + impostor.glb + asset.json
 echo Do enginu: celou slozku zkopiruj, ve scene odkazuj lod0.glb
 pause

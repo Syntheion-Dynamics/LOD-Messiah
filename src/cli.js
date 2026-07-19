@@ -11,24 +11,24 @@ function printHelp() {
 LOD Messiah — High-Poly → Engine-Ready (KitBash pipeline)
 
   npm run convert -- -i <file|folder> [-i <more>…] -o ./output [options]
-  npm run convert:kits -- -o ./output --no-ktx2 --no-impostor
+  npm run convert:kits -- -o ./output --no-ktx2
 
-Defaults: atlas OFF, ktx2 ON, LOD 0.5/0.3/0.1, octahedral impostor 4096/12
-  Material merge (no rebake) always runs — keeps KitBash tiling UVs.
+Defaults: lod2 atlas ON (1024), ktx2 ON, LOD 0.5/0.3/0.1, octahedral impostor 4096/12
+  lod0/lod1: tiling multi-material. lod2: unique UV + 1× atlas (Blender), fallback geometry-only.
 
 Multi-kit:
   -i / --input PATH       Repeatable. File or folder (walks recursively).
   --kits-root PATH        Process each subfolder as a kit
-                          (default if used alone: ./Kitbash Assets)
                           Output: <out>/<KitName>/<asset>/…
   --only A,B              With --kits-root: only these kit folder names
 
-  --atlas / --no-atlas    Experimental join-all atlas bake (Blender); QC may reject
-  --hero                  Higher impostor (4096/16) + atlas 2048 if --atlas
+  --no-lod2-atlas         Skip LOD2 atlas bake (geometry-only like lod1)
+  --lod2-atlas-res N      LOD2 atlas edge px (default 1024, hero→2048)
+  --hero                  Higher impostor (4096/16) + lod2 atlas 2048
   --ktx2 / --no-ktx2      toktx KTX2 compress
   --ratio 0.5,0.3,0.1     Mesh LOD ratios
   --impostor-mode octahedral|box
-  --impostor-res N        Atlas edge px (default 4096)
+  --impostor-res N        Impostor atlas edge px (default 4096)
   --impostor-frames N     Grid size (default 12)
   --no-impostor
   --max-texture N         Cap basecolor/emissive; normal/ORM capped at 1024
@@ -39,7 +39,7 @@ Multi-kit:
   --keep-work
 
 Engine handoff tip:
-  npm run convert:kits -- -o ./output --no-ktx2 --no-impostor
+  npm run convert:kits -- -o ./output --no-ktx2
 `);
 }
 
@@ -66,7 +66,8 @@ function parseArgs(argv) {
     impostorRes: 4096,
     impostorFrames: 12,
     impostorTop: false,
-    atlas: false,
+    lod2Atlas: true,
+    lod2AtlasRes: null,
     hero: false,
     ktx2: true,
     help: false,
@@ -119,10 +120,18 @@ function parseArgs(argv) {
         break;
       }
       case '--atlas':
-        args.atlas = true;
+        console.warn(
+          '  note: --atlas (pre-LOD join-all) removed; LOD2 atlas is on by default. Use --no-lod2-atlas to disable.',
+        );
         break;
       case '--no-atlas':
-        args.atlas = false;
+        args.lod2Atlas = false;
+        break;
+      case '--no-lod2-atlas':
+        args.lod2Atlas = false;
+        break;
+      case '--lod2-atlas-res':
+        args.lod2AtlasRes = Number(next());
         break;
       case '--hero':
         args.hero = true;
@@ -213,7 +222,8 @@ function buildOptions(args, inputRoot, outputDir) {
     impostorRes: args.impostorRes,
     impostorFrames: args.impostorFrames,
     impostorTop: args.impostorTop,
-    atlas: args.atlas,
+    lod2Atlas: args.lod2Atlas,
+    lod2AtlasRes: args.lod2AtlasRes,
     hero: args.hero,
     ktx2: args.ktx2,
   };
@@ -225,7 +235,13 @@ function printBanner(options, extra = '') {
   console.log(`  input  : ${options.input}`);
   console.log(`  output : ${options.output}`);
   console.log(`  ratios : ${options.ratios.join(', ')}`);
-  console.log(`  atlas  : ${options.atlas ? (options.hero ? 'yes 2048' : 'yes 1024') : 'no'}`);
+  console.log(
+    `  lod2 atlas: ${
+      options.lod2Atlas !== false
+        ? `${options.lod2AtlasRes ?? (options.hero ? 2048 : 1024)}px`
+        : 'no'
+    }`,
+  );
   console.log(`  ktx2   : ${options.ktx2 ? 'yes' : 'no'}`);
   console.log(
     `  impostor: ${

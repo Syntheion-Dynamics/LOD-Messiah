@@ -286,13 +286,18 @@ try {
   });
 
   const browser = await puppeteer.launch({
-    headless: true,
+    headless: 'new',
     args: [
-      '--use-gl=angle',
-      '--enable-webgl',
-      '--ignore-gpu-blocklist',
       '--no-sandbox',
+      '--disable-setuid-sandbox',
+      '--disable-dev-shm-usage',
       '--disable-web-security',
+      '--ignore-gpu-blocklist',
+      '--enable-webgl',
+      '--enable-webgl2',
+      '--use-gl=angle',
+      '--use-angle=d3d11',
+      '--enable-unsafe-swiftshader',
     ],
   });
 

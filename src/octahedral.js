@@ -81,9 +81,14 @@ export async function generateOctahedralImpostor(options) {
         filePath = stagedGlb;
       } else if (url.pathname.startsWith('/vendor/three/')) {
         filePath = join(threeRoot, url.pathname.slice('/vendor/three/'.length));
+      } else if (url.pathname === '/favicon.ico') {
+        res.writeHead(204);
+        res.end();
+        return;
       } else {
         res.writeHead(404);
-        res.end('not found');
+        res.end('not found: ' + url.pathname);
+        console.warn(`  octahedral 404: ${url.pathname}`);
         return;
       }
       if (!existsSync(filePath)) {
@@ -107,21 +112,28 @@ export async function generateOctahedralImpostor(options) {
   });
 
   const browser = await puppeteer.launch({
-    headless: true,
+    headless: 'new',
     args: [
-      '--enable-webgl',
-      '--use-gl=swiftshader',
-      '--ignore-gpu-blocklist',
       '--no-sandbox',
+      '--disable-setuid-sandbox',
+      '--disable-dev-shm-usage',
       '--disable-web-security',
+      '--ignore-gpu-blocklist',
+      '--enable-webgl',
+      '--enable-webgl2',
+      // Windows: Angle→D3D11 usually works; SwiftShader as software fallback.
+      '--use-gl=angle',
+      '--use-angle=d3d11',
+      '--enable-unsafe-swiftshader',
     ],
   });
 
   try {
     const page = await browser.newPage();
-    page.setDefaultTimeout(300000);
+    // Heavy meshes: long load + per-row bake; don't kill mid-atlas.
+    page.setDefaultTimeout(600000);
     page.on('pageerror', (err) =>
-      console.warn(`  octahedral pageerror: ${err.message}`),
+      console.warn(`  octahedral pageerror: ${err.message}\n${err.stack || ''}`),
     );
     page.on('console', (msg) => {
       if (msg.type() === 'error') {
@@ -139,17 +151,47 @@ export async function generateOctahedralImpostor(options) {
 
     await page.goto(`http://127.0.0.1:${port}/`, {
       waitUntil: 'networkidle0',
-      timeout: 300000,
+      timeout: 600000,
     });
 
     await page.waitForFunction(
       () =>
-        window.__OCTA__ &&
-        (window.__OCTA__.ok === true || window.__OCTA__.ok === false),
-      { timeout: 300000 },
+        window.__OCTA_API__ &&
+        (window.__OCTA_API__.ready === true || window.__OCTA_API__.error),
+      { timeout: 600000 },
     );
 
-    const data = await page.evaluate(() => window.__OCTA__);
+    const boot = await page.evaluate(() => ({
+      ready: window.__OCTA_API__.ready,
+      error: window.__OCTA_API__.error || null,
+    }));
+    if (!boot.ready) {
+      throw new Error(`Octahedral bake failed to load model: ${boot.error}`);
+    }
+
+    // Bake one row at a time so Chromium can breathe (avoids single 144-frame hang).
+    for (let j = 0; j < frames; j++) {
+      const row = await page.evaluate(async (rowIndex) => {
+        try {
+          await window.__OCTA_API__.bakeRow(rowIndex);
+          return { ok: true, row: rowIndex };
+        } catch (err) {
+          return {
+            ok: false,
+            row: rowIndex,
+            error: String(err && err.message ? err.message : err),
+          };
+        }
+      }, j);
+      if (!row.ok) {
+        throw new Error(`Octahedral bake row ${row.row} failed: ${row.error}`);
+      }
+      if (j % 2 === 0 || j === frames - 1) {
+        console.log(`  [bake] row ${j + 1} / ${frames}`);
+      }
+    }
+
+    const data = await page.evaluate(() => window.__OCTA_API__.finish());
     if (!data.ok) {
       throw new Error(`Octahedral bake failed: ${data.error}`);
     }
@@ -215,6 +257,19 @@ function buildBakerHtml({ atlasSize, frames, hemi }) {
 <body>
 <canvas id="tile" width="256" height="256"></canvas>
 <canvas id="atlas" width="${atlasSize}" height="${atlasSize}"></canvas>
+<script>
+window.__OCTA_API__ = { ready: false, error: null };
+window.addEventListener('error', (e) => {
+  if (!window.__OCTA_API__.ready) {
+    window.__OCTA_API__.error = String(e.message || e.error || e);
+  }
+});
+window.addEventListener('unhandledrejection', (e) => {
+  if (!window.__OCTA_API__.ready) {
+    window.__OCTA_API__.error = String(e.reason && e.reason.message ? e.reason.message : e.reason);
+  }
+});
+</script>
 <script type="importmap">
 {
   "imports": {
@@ -242,6 +297,7 @@ atlasCtx.clearRect(0, 0, atlasSize, atlasSize);
 const renderer = new THREE.WebGLRenderer({
   canvas: tileCanvas, alpha: true, antialias: true, preserveDrawingBuffer: true,
   powerPreference: 'high-performance',
+  failIfMajorPerformanceCaveat: false,
 });
 renderer.setSize(tileSize, tileSize, false);
 renderer.setClearColor(0x000000, 0);
@@ -270,7 +326,6 @@ function octaDecode(u, v, hemiMode) {
   const z = v * 2 - 1;
   let dir;
   if (hemiMode) {
-    // Upper hemisphere: y = 1 - |x| - |z|
     dir = new THREE.Vector3(x, 1.0 - Math.abs(x) - Math.abs(z), z);
   } else {
     dir = new THREE.Vector3(x, 1.0 - Math.abs(x) - Math.abs(z), z);
@@ -283,17 +338,28 @@ function octaDecode(u, v, hemiMode) {
   return dir.normalize();
 }
 
+function nextFrame() {
+  return new Promise((resolve) => requestAnimationFrame(() => resolve()));
+}
+
+let center = null;
+let size = null;
+let radius = 0;
+
+window.__OCTA_API__.ready = false;
+window.__OCTA_API__.error = null;
+
 try {
   console.log('[bake] loading model…');
   const gltf = await new GLTFLoader().loadAsync('/model.glb');
   scene.add(gltf.scene);
 
   const box = new THREE.Box3().setFromObject(gltf.scene);
-  const size = new THREE.Vector3();
-  const center = new THREE.Vector3();
+  size = new THREE.Vector3();
+  center = new THREE.Vector3();
   box.getSize(size);
   box.getCenter(center);
-  const radius = Math.max(size.x, size.y, size.z) * 0.5 * Math.SQRT2;
+  radius = Math.max(size.x, size.y, size.z) * 0.5 * Math.SQRT2;
   const ortho = radius * 2.05;
 
   camera.left = -ortho / 2;
@@ -304,9 +370,9 @@ try {
   camera.far = radius * 20;
   camera.updateProjectionMatrix();
 
-  console.log('[bake] frames', frames, 'tile', tileSize);
+  console.log('[bake] ready frames', frames, 'tile', tileSize);
 
-  for (let j = 0; j < frames; j++) {
+  window.__OCTA_API__.bakeRow = async function bakeRow(j) {
     for (let i = 0; i < frames; i++) {
       const u = (i + 0.5) / frames;
       const v = (j + 0.5) / frames;
@@ -314,35 +380,41 @@ try {
 
       camera.position.copy(center).addScaledVector(dir, radius * 2.5);
       camera.up.set(0, 1, 0);
-      // Avoid gimbal when looking straight down/up
       if (Math.abs(dir.y) > 0.99) camera.up.set(0, 0, dir.y > 0 ? -1 : 1);
       camera.lookAt(center);
 
       renderer.render(scene, camera);
 
-      // Atlas layout: cell (i,j) at (i,j), j=0 at TOP of PNG.
-      // Preview loads with flipY=false so V+ goes down the image with j.
       const dx = i * tileSize;
       const dy = j * tileSize;
       atlasCtx.drawImage(tileCanvas, dx, dy, tileSize, tileSize);
     }
-    if (j % 2 === 0) console.log('[bake] row', j + 1, '/', frames);
-  }
-
-  window.__OCTA__ = {
-    ok: true,
-    atlas: atlasCanvas.toDataURL('image/png'),
-    center: { x: center.x, y: center.y, z: center.z },
-    size: { x: size.x, y: size.y, z: size.z },
-    radius,
-    frames,
-    atlasSize,
-    hemi,
-    atlasLayout: 'j0_top', // cell (i,j) at (i,j); load texture with flipY=false
+    // Yield so Puppeteer / compositor can flush between rows
+    await nextFrame();
   };
-  console.log('[bake] done');
+
+  window.__OCTA_API__.finish = function finish() {
+    try {
+      return {
+        ok: true,
+        atlas: atlasCanvas.toDataURL('image/png'),
+        center: { x: center.x, y: center.y, z: center.z },
+        size: { x: size.x, y: size.y, z: size.z },
+        radius,
+        frames,
+        atlasSize,
+        hemi,
+        atlasLayout: 'j0_top',
+      };
+    } catch (err) {
+      return { ok: false, error: String(err && err.message ? err.message : err) };
+    }
+  };
+
+  window.__OCTA_API__.ready = true;
 } catch (err) {
-  window.__OCTA__ = { ok: false, error: String(err && err.message ? err.message : err) };
+  window.__OCTA_API__.ready = false;
+  window.__OCTA_API__.error = String(err && err.message ? err.message : err);
 }
 </script>
 </body></html>`;
