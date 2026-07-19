@@ -243,7 +243,7 @@
     <aside>
       <header>
         <h1>Cook gallery</h1>
-        <p>Seznam z <code>output/</code> — LOD čísla + náhled impostoru</p>
+        <p>Seznam z <code>output/</code> (+ kity Manhattan/Brooklyn/…) — LOD + impostor. Impostor oddal!</p>
       </header>
       <div class="toolbar">
         <input id="q" type="search" placeholder="Filtrovat…" />
@@ -385,8 +385,9 @@
       }
       if (a.hasLod0) {
         const lod = document.createElement('a');
-        lod.href = `/files/${encodeURIComponent(a.name)}/lod0.glb`;
-        lod.download = `${a.name}_lod0.glb`;
+        const enc = a.name.split('/').map(encodeURIComponent).join('/');
+        lod.href = `/files/${enc}/lod0.glb`;
+        lod.download = `${a.name.replace(/\//g, '_')}_lod0.glb`;
         lod.textContent = 'LOD0.glb';
         lod.style.cssText =
           'border:1px solid var(--line);border-radius:6px;padding:8px 10px;';

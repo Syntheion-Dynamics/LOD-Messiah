@@ -17,5 +17,11 @@ if not exist "output\" (
   exit /b 1
 )
 
+REM Kill stale gallery on same port (otherwise UI stays on old code).
+for /f "tokens=5" %%P in ('netstat -ano ^| findstr ":4173" ^| findstr "LISTENING"') do (
+  echo [i] Ukoncuji stary gallery server PID %%P
+  taskkill /F /PID %%P >nul 2>&1
+)
+
 start "" "http://127.0.0.1:4173"
 call npm run gallery

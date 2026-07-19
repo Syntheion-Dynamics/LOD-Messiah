@@ -4,7 +4,7 @@ import {
   discoverAssets,
   listKitFolders,
 } from './convert.js';
-import { processBatch } from './pipeline.js';
+import { processAsset, processBatch } from './pipeline.js';
 
 function printHelp() {
   console.log(`
@@ -24,6 +24,11 @@ Multi-kit:
 
   --no-lod2-atlas         Skip LOD2 atlas bake (geometry-only like lod1)
   --lod2-atlas-res N      LOD2 atlas edge px (default 1024, hero→2048)
+  --lod3-silhouette       Height-slice silhouette + MASK albedo (DEFAULT on)
+  --no-lod3-silhouette    Skip LOD3 silhouette proxy
+  --lod3-res N            LOD3 albedo edge px (default 2048)
+  --lod3-slices N         LOD3 max adaptive A(z) bands (default 8)
+  --lod3-method M         visual-hull (default) | slices
   --hero                  Higher impostor (4096/16) + lod2 atlas 2048
   --ktx2 / --no-ktx2      toktx KTX2 compress
   --ratio 0.5,0.3,0.1     Mesh LOD ratios
@@ -35,11 +40,12 @@ Multi-kit:
   --pack                  Also write legacy pack.glb (off by default)
   --shared-textures       Kit _textures/ + external URIs (engine must support!)
   --no-shared-textures    Embed textures in lod0 (DEFAULT — engine-safe)
+  --jobs N / -j N         Parallel assets (default 1; kitbash-all uses 7)
   --blender / --toktx     Tool paths
   --keep-work
 
 Engine handoff tip:
-  npm run convert:kits -- -o ./output --no-ktx2
+  npm run convert:kits -- -o ./output --no-ktx2 --jobs 7
 `);
 }
 
@@ -68,8 +74,13 @@ function parseArgs(argv) {
     impostorTop: false,
     lod2Atlas: true,
     lod2AtlasRes: null,
+    lod3Silhouette: true,
+    lod3Res: 2048,
+    lod3Slices: 8,
+    lod3Method: 'visual-hull',
     hero: false,
     ktx2: true,
+    jobs: 1,
     help: false,
   };
 
@@ -133,6 +144,21 @@ function parseArgs(argv) {
       case '--lod2-atlas-res':
         args.lod2AtlasRes = Number(next());
         break;
+      case '--lod3-silhouette':
+        args.lod3Silhouette = true;
+        break;
+      case '--no-lod3-silhouette':
+        args.lod3Silhouette = false;
+        break;
+      case '--lod3-res':
+        args.lod3Res = Number(next());
+        break;
+      case '--lod3-slices':
+        args.lod3Slices = Number(next());
+        break;
+      case '--lod3-method':
+        args.lod3Method = next();
+        break;
       case '--hero':
         args.hero = true;
         break;
@@ -190,6 +216,10 @@ function parseArgs(argv) {
       case '--keep-work':
         args.keepWork = true;
         break;
+      case '--jobs':
+      case '-j':
+        args.jobs = Number(next());
+        break;
       default:
         if (a.startsWith('-')) throw new Error(`Unknown option: ${a}`);
         // positional: first = input, second = output (legacy)
@@ -224,8 +254,13 @@ function buildOptions(args, inputRoot, outputDir) {
     impostorTop: args.impostorTop,
     lod2Atlas: args.lod2Atlas,
     lod2AtlasRes: args.lod2AtlasRes,
+    lod3Silhouette: args.lod3Silhouette,
+    lod3Res: args.lod3Res,
+    lod3Slices: args.lod3Slices,
+    lod3Method: args.lod3Method,
     hero: args.hero,
     ktx2: args.ktx2,
+    jobs: args.jobs,
   };
 }
 
@@ -242,6 +277,13 @@ function printBanner(options, extra = '') {
         : 'no'
     }`,
   );
+  console.log(
+    `  lod3 silhouette: ${
+      options.lod3Silhouette !== false
+        ? `${options.lod3Res ?? 2048}px, ${options.lod3Method ?? 'visual-hull'}, ≤${options.lod3Slices ?? 8} slices`
+        : 'no'
+    }`,
+  );
   console.log(`  ktx2   : ${options.ktx2 ? 'yes' : 'no'}`);
   console.log(
     `  impostor: ${
@@ -250,6 +292,7 @@ function printBanner(options, extra = '') {
         : 'no'
     }`,
   );
+  console.log(`  jobs   : ${options.jobs ?? 1}`);
 }
 
 async function main() {
@@ -282,20 +325,59 @@ async function main() {
       console.error(`No kit folders under ${kitsRoot}`);
       process.exit(1);
     }
-    console.log(`LOD Messiah — kits mode (${kits.length}): ${kits.map((k) => k.name).join(', ')}`);
+    const jobs = Math.max(1, Math.min(16, Number(args.jobs) || 1));
+    console.log(
+      `LOD Messiah — kits mode (${kits.length}): ${kits.map((k) => k.name).join(', ')}  jobs=${jobs}`,
+    );
 
+    // Flatten all kit assets into one pool so --jobs stays saturated across kits
+    /** @type {{ asset: string, options: ReturnType<typeof buildOptions> }[]} */
+    const queue = [];
     for (const kit of kits) {
       const options = buildOptions(args, kit.path, join(args.output, kit.name));
-      printBanner(options, `kit: ${kit.name}`);
+      options.jobs = 1; // parallelism is at queue level
       const assets = discoverAssets(kit.path);
       if (assets.length === 0) {
         console.warn(`  skip ${kit.name}: no assets`);
         continue;
       }
-      console.log(`  assets : ${assets.length}`);
-      const { failures } = await processBatch(assets, options);
-      totalFailures += failures.length;
+      console.log(`  kit ${kit.name}: ${assets.length} asset(s)`);
+      for (const asset of assets) {
+        queue.push({ asset, options });
+      }
     }
+    if (queue.length === 0) {
+      console.error('No assets found in kits.');
+      process.exit(1);
+    }
+    printBanner(
+      { ...queue[0].options, jobs, output: resolve(args.output), input: kitsRoot },
+      `queue: ${queue.length} assets`,
+    );
+
+    let ok = 0;
+    let next = 0;
+    const failures = [];
+    await Promise.all(
+      Array.from({ length: Math.min(jobs, queue.length) }, async () => {
+        while (true) {
+          const i = next++;
+          if (i >= queue.length) return;
+          const { asset, options } = queue[i];
+          try {
+            await processAsset(asset, options);
+            ok++;
+          } catch (err) {
+            console.error(`\n✗ FAILED: ${asset}`);
+            console.error(`  ${err.message}`);
+            if (err.stack) console.error(err.stack);
+            failures.push({ asset, error: err.message });
+          }
+        }
+      }),
+    );
+    totalFailures += failures.length;
+    console.log(`\nKits done. OK=${ok} Failed=${failures.length} jobs=${jobs}`);
     process.exit(totalFailures > 0 ? 1 : 0);
   }
 

@@ -27,8 +27,10 @@ const scene = new THREE.Scene(); scene.background = new THREE.Color(0x222228);
 window.renderGlb = async (url) => {
   const gltf = await new GLTFLoader().loadAsync(url);
   const obj = gltf.scene;
-  obj.traverse(n => { if (n.isMesh) n.material = new THREE.MeshNormalMaterial({ flatShading: true }); });
+  if (!url.includes('lod2')) obj.traverse(n => { if (n.isMesh) n.material = new THREE.MeshNormalMaterial({ flatShading: true }); });
   scene.clear(); scene.add(obj);
+  scene.add(new THREE.AmbientLight(0xffffff, 2.2));
+  const sun = new THREE.DirectionalLight(0xffffff, 2.0); sun.position.set(1, 2, 1); scene.add(sun);
   const box = new THREE.Box3().setFromObject(obj);
   const c = box.getCenter(new THREE.Vector3()), s = box.getSize(new THREE.Vector3());
   const d = Math.max(s.x, s.y, s.z);

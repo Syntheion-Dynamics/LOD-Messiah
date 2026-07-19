@@ -13,9 +13,9 @@ import { dirname, join, extname } from 'node:path';
 import { createServer } from 'node:http';
 import { Document, NodeIO } from '@gltf-transform/core';
 import { ALL_EXTENSIONS } from '@gltf-transform/extensions';
-import { spawnSync } from 'node:child_process';
 import { resolveBlender, ROOT } from './convert.js';
 import { generateOctahedralImpostor } from './octahedral.js';
+import { spawnAsync } from './spawn-async.js';
 
 /**
  * @param {object} options
@@ -76,7 +76,7 @@ export async function generateImpostor(options) {
   });
 }
 
-function runBlenderImpostor({
+async function runBlenderImpostor({
   blender,
   inputGlb,
   outputGlb,
@@ -101,10 +101,7 @@ function runBlenderImpostor({
   ];
   if (includeTop) args.push('--include-top');
 
-  const r = spawnSync(blender, args, {
-    encoding: 'utf8',
-    maxBuffer: 128 * 1024 * 1024,
-  });
+  const r = await spawnAsync(blender, args, { maxBuffer: 128 * 1024 * 1024 });
   if (r.status !== 0 || !existsSync(outputGlb)) {
     throw new Error(
       `Blender impostor failed (${r.status}):\n${r.stderr || r.stdout || 'no output'}`,

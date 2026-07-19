@@ -1,4 +1,5 @@
 {
   "blender": "C:\\Program Files\\Blender Foundation\\Blender 5.1\\blender.exe",
-  "comment": "Copy to tools.config.json and adjust path. Or set BLENDER_PATH / --blender."
+  "bungacAssets": "C:\\Users\\you\\Documents\\PROJEKT X\\Programming Projects\\GTA\\Assets",
+  "comment": "Copy to tools.config.json and adjust paths. Or set BLENDER_PATH / --blender / BUNGAC_ASSETS."
 }

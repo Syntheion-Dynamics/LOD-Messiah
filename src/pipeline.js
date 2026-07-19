@@ -29,8 +29,10 @@ import {
 import { mergeMaterials } from './material-merge.js';
 import { compressTexturesKtx2 } from './ktx2.js';
 import { permissiveSimplify } from './permissive-simplify.js';
+import { countGlassTris } from './glass-materials.js';
 import { generateImpostor } from './impostor.js';
 import { bakeLod2Atlas } from './lod2-atlas.js';
+import { bakeLod3Silhouette } from './lod3-silhouette.js';
 import {
   collectStats,
   fileSizeBytes,
@@ -67,8 +69,13 @@ const TEX_CAP_ORM = 1024;
  * @property {boolean} impostorTop
  * @property {boolean} [lod2Atlas] default true — bake unique UV + 1024 atlas on last LOD
  * @property {number} [lod2AtlasRes]
+ * @property {boolean} [lod3Silhouette] default true — height-slice shell + MASK albedo
+ * @property {number} [lod3Res]
+ * @property {number} [lod3Slices] max adaptive A(z) bands (default 8)
+ * @property {'visual-hull'|'slices'} [lod3Method]
  * @property {boolean} hero
  * @property {boolean} ktx2
+ * @property {number} [jobs] parallel assets (default 1)
  */
 
 export async function processAsset(assetPath, options) {
@@ -188,10 +195,12 @@ export async function processAsset(assetPath, options) {
           ? options.errors[i]
           : options.error * errorMul;
       const protectUv = i < 2;
+      // Keep glass/emissive facade panes on every LOD (thin windows vanish under meshopt).
+      const protectGlass = true;
       const pruneError = i >= 2 ? 0.02 : 0.01;
 
       console.log(
-        `  ${label}: permissive simplify ratio=${ratio} error=${lodError} prune=${pruneError}${protectUv ? '' : ' (uv seams free)'}`,
+        `  ${label}: permissive simplify ratio=${ratio} error=${lodError} prune=${pruneError}${protectUv ? '' : ' (uv seams free)'}${protectGlass ? ' +glass protect' : ''}`,
       );
 
       const doc = await io.read(glbPath);
@@ -202,9 +211,10 @@ export async function processAsset(assetPath, options) {
         error: lodError,
         pruneError,
         protectUv,
+        protectGlass,
       });
       console.log(
-        `  ${label}: tris ${simp.srcTris.toLocaleString()} → ${simp.dstTris.toLocaleString()}`,
+        `  ${label}: tris ${simp.srcTris.toLocaleString()} → ${simp.dstTris.toLocaleString()}${simp.skippedTris ? ` (glass kept ${simp.skippedTris.toLocaleString()})` : ''}`,
       );
 
       await MeshoptEncoder.ready;
@@ -238,6 +248,7 @@ export async function processAsset(assetPath, options) {
             error: lodError,
             pruneError,
             protectUv,
+            protectGlass,
           });
           await MeshoptEncoder.ready;
           await pngDoc.transform(
@@ -259,6 +270,7 @@ export async function processAsset(assetPath, options) {
               error: lodError,
               pruneError,
               protectUv,
+              protectGlass,
             });
             await MeshoptEncoder.ready;
             await bakeDoc.transform(
@@ -320,6 +332,8 @@ export async function processAsset(assetPath, options) {
       const statsDoc = lod2AtlasOk ? await io.read(lodPath) : doc;
       const stats = collectStats(statsDoc, fileSizeBytes(lodPath));
       const health = assessHealth(beforeGeom, stats, ratio);
+      // Count glass after simplify (before atlas merges materials away).
+      const glassAfterSimplify = countGlassTris(doc);
       lodResults.push({
         label,
         level: i,
@@ -329,14 +343,65 @@ export async function processAsset(assetPath, options) {
         health,
         baked: lod2AtlasOk,
         atlas: lod2AtlasOk,
+        glassTris: glassAfterSimplify.tris,
+        glassPrims: glassAfterSimplify.prims,
         reduction: reductionReport(beforeGeom, stats),
-        // Embedded lod0 for impostor bake (Puppeteer can't follow ../_textures)
+        // Embedded lod0 kept for diagnostics / fallback
         embedPath: i === 0 ? pathJoin(workDir, 'lod0_embedded.glb') : null,
       });
       if (lod2AtlasOk) atlasUsed = true;
     }
 
-    // 5) Impostor — stage into workDir; bake from embedded lod0 (not external)
+    // 5) LOD3 silhouette proxy — height-slice shell + MASK bake (before octahedral impostor)
+    let lod3Info = null;
+    if (options.lod3Silhouette !== false) {
+      const lod3Source = existsSync(impostorSourceGlb)
+        ? impostorSourceGlb
+        : existsSync(defaultPath)
+          ? defaultPath
+          : null;
+      if (!lod3Source) {
+        console.warn('  LOD3: skipped — no bake source GLB');
+      } else {
+        const lod3Res = options.lod3Res ?? 2048;
+        const lod3Slices = options.lod3Slices ?? 8;
+        const lod3Method = options.lod3Method ?? 'visual-hull';
+        try {
+          lod3Info = await bakeLod3Silhouette({
+            inputGlb: lod3Source,
+            outDir,
+            workDir,
+            resolution: lod3Res,
+            slices: lod3Slices,
+            method: lod3Method,
+            blender: options.blender,
+          });
+          const lod3Path = lod3Info.outputGlb;
+          const stats = collectStats(await io.read(lod3Path), fileSizeBytes(lod3Path));
+          lodResults.push({
+            label: 'LOD3',
+            level: 3,
+            targetRatio: null,
+            path: lod3Path,
+            stats,
+            health: {
+              ok: true,
+              msg: `${lod3Info.method || lod3Method} silhouette — ${lod3Info.triangles} tris`,
+            },
+            baked: true,
+            atlas: true,
+            maps: 'lod3_atlas/',
+            reduction: reductionReport(beforeGeom, stats),
+          });
+        } catch (err) {
+          console.warn(`  LOD3: skipped — ${err.message}`);
+          if (err.stack) console.warn(err.stack);
+          lod3Info = { ok: false, reason: err.message };
+        }
+      }
+    }
+
+    // 6) Impostor — photograph full-quality default (not decimated lod0)
     let impostorInfo = null;
     if (options.impostor) {
       const impostorPath = pathJoin(outDir, 'impostor.glb');
@@ -351,20 +416,26 @@ export async function processAsset(assetPath, options) {
           impostorFrames = 16;
         }
       }
+      // Prefer PNG full mesh (same as default.glb quality). External default
+      // can't be loaded in Puppeteer — embeddedGlb always has textures inline.
       const lod0Entry = lodResults.find((l) => l.level === 0);
-      const bakeFrom =
-        (lod0Entry?.embedPath && existsSync(lod0Entry.embedPath)
-          ? lod0Entry.embedPath
-          : null) ||
-        (lod0Entry?.path && existsSync(lod0Entry.path) ? lod0Entry.path : null) ||
-        impostorSourceGlb;
-      const bakeSrcLabel = bakeFrom === lod0Entry?.embedPath
-        ? 'lod0_embedded'
-        : bakeFrom === lod0Entry?.path
-          ? 'lod0'
-          : 'full embedded';
+      const bakeFrom = existsSync(impostorSourceGlb)
+        ? impostorSourceGlb
+        : (lod0Entry?.embedPath && existsSync(lod0Entry.embedPath)
+            ? lod0Entry.embedPath
+            : lod0Entry?.path);
+      if (!bakeFrom || !existsSync(bakeFrom)) {
+        console.warn('  impostor: FAILED — no bake source GLB');
+        impostorInfo = { ok: false, reason: 'no bake source GLB' };
+      } else {
+      const bakeSrcLabel =
+        bakeFrom === impostorSourceGlb
+          ? 'default (full mesh)'
+          : bakeFrom === lod0Entry?.embedPath
+            ? 'lod0_embedded'
+            : 'lod0';
       console.log(
-        `  impostor: baking from ${bakeSrcLabel} (${(fileSizeBytes(bakeFrom) / (1024 * 1024)).toFixed(1)} MB)`,
+        `  impostor: baking from ${bakeSrcLabel} (${(fileSizeBytes(bakeFrom) / (1024 * 1024)).toFixed(1)} MB) @ ${impostorRes}px / ${impostorFrames}×${impostorFrames}`,
       );
       try {
         const result = await generateImpostor({
@@ -393,6 +464,10 @@ export async function processAsset(assetPath, options) {
           frames: result.frames || impostorFrames,
           resolution: result.atlasSize || impostorRes,
           hemi: true,
+          source: bakeSrcLabel,
+          gutterPx: result.gutterPx ?? null,
+          alphaMode: result.alphaMode || null,
+          meta: 'impostor.json',
         };
         lodResults.push({
           label: 'IMPOSTOR',
@@ -404,7 +479,7 @@ export async function processAsset(assetPath, options) {
             ok: true,
             msg:
               mode === 'octahedral'
-                ? `octahedral — open preview.html`
+                ? `octahedral from ${bakeSrcLabel} — open preview.html`
                 : `box impostor`,
           },
           baked: false,
@@ -418,6 +493,7 @@ export async function processAsset(assetPath, options) {
         if (err?.stack) console.warn(err.stack);
         impostorInfo = { ok: false, reason };
       }
+      } // bakeFrom exists
     }
 
     // Fix 3: asset.json sidecar (pack.glb only if --pack)
@@ -436,6 +512,24 @@ export async function processAsset(assetPath, options) {
 
     printAssetReport(stem, beforeGeom, lodResults);
 
+    const glassQc = await buildGlassQc(io, baselineDoc, lodResults);
+    if (glassQc) {
+      const fmtPct = (tris) =>
+        glassQc.baselineTris > 0
+          ? ((tris / glassQc.baselineTris) * 100).toFixed(1)
+          : 'n/a';
+      console.log(
+        `  glass QC : baseline ${glassQc.baselineTris.toLocaleString()} tris` +
+          ` | LOD0 ${glassQc.lod0Tris.toLocaleString()} (${fmtPct(glassQc.lod0Tris)}%)` +
+          ` | LOD1 ${glassQc.lod1Tris.toLocaleString()} (${fmtPct(glassQc.lod1Tris)}%)` +
+          ` | LOD2 ${glassQc.lod2Tris.toLocaleString()} (${fmtPct(glassQc.lod2Tris)}%)` +
+          `${glassQc.warn ? ' ⚠ below 95%' : ''}`,
+      );
+      if (glassQc.materials.length) {
+        console.log(`  glass QC : materials [${glassQc.materials.join(', ')}]`);
+      }
+    }
+
     const report = {
       name: stem,
       source: assetPath,
@@ -445,6 +539,9 @@ export async function processAsset(assetPath, options) {
         ratios,
         lod2Atlas: options.lod2Atlas !== false,
         atlasUsed,
+        lod3Silhouette: options.lod3Silhouette !== false,
+        lod3Slices: options.lod3Slices ?? 8,
+        lod3Method: options.lod3Method ?? 'visual-hull',
         hero: !!options.hero,
         ktx2: options.ktx2 !== false,
         impostor: options.impostor,
@@ -452,12 +549,14 @@ export async function processAsset(assetPath, options) {
         sharedTextures,
         maxTexture: options.maxTexture,
       },
+      lod3: lod3Info,
       beforeRaw,
       before: beforeGeom,
       materialMerge: mergeStats,
       sharedTextures: sharedTexStats,
       default: defaultPath,
       asset: assetJsonPath,
+      glassQc,
       lods: lodResults.map((l) => ({
         label: l.label,
         level: l.level,
@@ -508,6 +607,75 @@ export async function processAsset(assetPath, options) {
 
 function createIO() {
   return new NodeIO().registerExtensions(ALL_EXTENSIONS);
+}
+
+/**
+ * Soft QC: glass/emissive tris on baseline vs LOD0/1/2 (warn if any under 95% kept).
+ * Prefers per-LOD counts taken after simplify (before atlas merges materials).
+ * @param {import('@gltf-transform/core').NodeIO} io
+ * @param {import('@gltf-transform/core').Document} baselineDoc
+ * @param {Array<{ level: number, path: string, glassTris?: number, glassPrims?: number, atlas?: boolean }>} lodResults
+ */
+async function buildGlassQc(io, baselineDoc, lodResults) {
+  const baseline = countGlassTris(baselineDoc);
+  const materials = new Set(baseline.materials);
+
+  /** @type {{ tris: number, prims: number }[]} */
+  const perLod = [];
+  for (let level = 0; level <= 2; level++) {
+    const entry = lodResults.find((l) => l.level === level && l.path);
+    if (!entry) {
+      perLod.push({ tris: 0, prims: 0 });
+      continue;
+    }
+    if (typeof entry.glassTris === 'number') {
+      perLod.push({
+        tris: entry.glassTris,
+        prims: entry.glassPrims ?? 0,
+      });
+      continue;
+    }
+    if (!existsSync(entry.path)) {
+      perLod.push({ tris: 0, prims: 0 });
+      continue;
+    }
+    try {
+      const doc = await io.read(entry.path);
+      const counted = countGlassTris(doc);
+      perLod.push({ tris: counted.tris, prims: counted.prims });
+      for (const name of counted.materials) materials.add(name);
+    } catch {
+      perLod.push({ tris: 0, prims: 0 });
+    }
+  }
+
+  const ratioOf = (tris) => {
+    if (baseline.tris > 0) return Math.round((tris / baseline.tris) * 1000) / 1000;
+    return tris === 0 ? 1 : 0;
+  };
+  const ratio0 = ratioOf(perLod[0].tris);
+  const ratio1 = ratioOf(perLod[1].tris);
+  const ratio2 = ratioOf(perLod[2].tris);
+  const warn =
+    baseline.tris > 0 &&
+    (ratio0 < 0.95 || ratio1 < 0.95 || ratio2 < 0.95);
+
+  return {
+    baselineTris: baseline.tris,
+    lod0Tris: perLod[0].tris,
+    lod1Tris: perLod[1].tris,
+    lod2Tris: perLod[2].tris,
+    baselinePrims: baseline.prims,
+    lod0Prims: perLod[0].prims,
+    lod1Prims: perLod[1].prims,
+    lod2Prims: perLod[2].prims,
+    ratio: ratio0,
+    ratio0,
+    ratio1,
+    ratio2,
+    warn,
+    materials: [...materials].sort(),
+  };
 }
 
 /** Detach and dispose every texture; materials survive as name stubs. */
@@ -721,10 +889,13 @@ function writeAssetJson(outDir, stem, lodResults, impostorInfo, extra = {}) {
         atlas: impostorInfo.atlasPath
           ? basename(impostorInfo.atlasPath)
           : 'impostor_atlas.png',
+        meta: impostorInfo.meta || 'impostor.json',
         frames: impostorInfo.frames ?? null,
         hemi: impostorInfo.hemi !== false,
         resolution: impostorInfo.resolution ?? null,
         mode: impostorInfo.mode || 'octahedral',
+        gutterPx: impostorInfo.gutterPx ?? null,
+        alphaMode: impostorInfo.alphaMode || null,
       };
     }
   }
@@ -738,7 +909,13 @@ function writeAssetJson(outDir, stem, lodResults, impostorInfo, extra = {}) {
       triangles: l.stats?.triangles ?? null,
       atlas: !!l.atlas,
       ...(l.atlas
-        ? { maps: 'lod2_atlas/', note: 'self-contained PBR atlas (unique UV)' }
+        ? {
+            maps: l.maps || (l.level === 3 ? 'lod3_atlas/' : 'lod2_atlas/'),
+            note:
+              l.level === 3
+                ? 'silhouette hull + baked sides; self-contained'
+                : 'self-contained PBR atlas (unique UV)',
+          }
         : l.level >= 1
           ? { note: 'geometry-only; materials from lod0' }
           : {}),
@@ -801,21 +978,47 @@ async function writePackGlb(io, lodResults, outDir, stem, impostorInfo = null) {
   return packPath;
 }
 
+/**
+ * @template T
+ * @param {T[]} items
+ * @param {number} concurrency
+ * @param {(item: T, index: number) => Promise<void>} worker
+ */
+async function mapPool(items, concurrency, worker) {
+  let next = 0;
+  const n = Math.max(1, Math.min(concurrency, items.length || 1));
+  await Promise.all(
+    Array.from({ length: Math.min(n, items.length) }, async () => {
+      while (true) {
+        const i = next++;
+        if (i >= items.length) return;
+        await worker(items[i], i);
+      }
+    }),
+  );
+}
+
 export async function processBatch(assets, options) {
   mkdirSync(options.output, { recursive: true });
   const reports = [];
   const failures = [];
+  const jobs = Math.max(1, Math.min(16, Number(options.jobs) || 1));
 
-  for (const asset of assets) {
+  if (jobs > 1) {
+    console.log(`  parallel jobs: ${jobs} (Blender LOD2/LOD3/impostor overlap)`);
+  }
+
+  await mapPool(assets, jobs, async (asset) => {
     try {
-      reports.push(await processAsset(asset, options));
+      const report = await processAsset(asset, options);
+      reports.push(report);
     } catch (err) {
       console.error(`\n✗ FAILED: ${asset}`);
       console.error(`  ${err.message}`);
       if (err.stack) console.error(err.stack);
       failures.push({ asset, error: err.message });
     }
-  }
+  });
 
   const summaryPath = pathJoin(options.output, 'batch_summary.json');
   writeFileSync(
@@ -826,6 +1029,7 @@ export async function processBatch(assets, options) {
         total: assets.length,
         ok: reports.length,
         failed: failures.length,
+        jobs,
         failures,
         assets: reports.map((r) => ({
           name: r.name,
@@ -842,6 +1046,6 @@ export async function processBatch(assets, options) {
     ),
   );
   console.log(`\nBatch summary: ${summaryPath}`);
-  console.log(`  OK: ${reports.length}  Failed: ${failures.length}`);
+  console.log(`  OK: ${reports.length}  Failed: ${failures.length}  jobs=${jobs}`);
   return { reports, failures };
 }

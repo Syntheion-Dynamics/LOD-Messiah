@@ -1,11 +1,11 @@
 #!/usr/bin/env node
 /**
- * Rebake octahedral impostors for already-cooked KitBash folders under output/.
- * Skips broken/empty lod0 and assets that already have impostor.glb (unless --force).
+ * Rebake octahedral impostors from default.glb (full mesh) at high res.
+ * Falls back to lod0 if default missing / too small / external-only.
  *
- *   node scripts/rebake-kitbash-impostors.js
- *   node scripts/rebake-kitbash-impostors.js Manhattan Brooklyn
- *   node scripts/rebake-kitbash-impostors.js --force
+ *   npm run rebake:impostors -- --force
+ *   npm run rebake:impostors -- --force Manhattan Brooklyn
+ *   IMPOSTOR_RES=4096 IMPOSTOR_FRAMES=16 npm run rebake:impostors -- --force
  */
 import { existsSync, readdirSync, readFileSync, statSync, writeFileSync, mkdirSync, rmSync } from 'node:fs';
 import { join, resolve, dirname } from 'node:path';
@@ -15,9 +15,9 @@ import { generateOctahedralImpostor } from '../src/octahedral.js';
 
 const ROOT = resolve(dirname(fileURLToPath(import.meta.url)), '..');
 const OUTPUT = join(ROOT, 'output');
-const MIN_LOD0_BYTES = 64 * 1024; // skip empty / broken cooks
-const ATLAS = Number(process.env.IMPOSTOR_RES || 2048);
-const FRAMES = Number(process.env.IMPOSTOR_FRAMES || 12);
+const MIN_BYTES = 64 * 1024;
+const ATLAS = Number(process.env.IMPOSTOR_RES || 4096);
+const FRAMES = Number(process.env.IMPOSTOR_FRAMES || 16);
 
 const argv = process.argv.slice(2);
 const force = argv.includes('--force');
@@ -25,37 +25,58 @@ const kitFilter = argv.filter((a) => a !== '--force');
 
 function listAssetDirs() {
   if (!existsSync(OUTPUT)) return [];
-
   /** @type {string[]} */
   const dirs = [];
 
-  // Flat cooks: output/Office_Plaza/
   for (const name of readdirSync(OUTPUT)) {
     if (name.startsWith('_') || name === 'node_modules') continue;
     const p = join(OUTPUT, name);
     if (!statSync(p).isDirectory()) continue;
 
-    const lod0 = join(p, 'lod0.glb');
-    if (existsSync(lod0)) {
+    if (existsSync(join(p, 'lod0.glb')) || existsSync(join(p, 'default.glb'))) {
       dirs.push(p);
       continue;
     }
 
-    // Kit layout: output/Manhattan/Office_Plaza/
     if (kitFilter.length && !kitFilter.includes(name)) continue;
     for (const child of readdirSync(p)) {
       if (child.startsWith('_')) continue;
       const cp = join(p, child);
       if (!statSync(cp).isDirectory()) continue;
-      if (existsSync(join(cp, 'lod0.glb'))) dirs.push(cp);
+      if (existsSync(join(cp, 'lod0.glb')) || existsSync(join(cp, 'default.glb'))) {
+        dirs.push(cp);
+      }
     }
   }
 
-  // If kit filter set, drop flat dirs that aren't under those kits
   if (kitFilter.length) {
-    return dirs.filter((d) => kitFilter.some((k) => d.includes(`${OUTPUT}\\${k}\\`) || d.includes(`${OUTPUT}/${k}/`)));
+    return dirs.filter((d) =>
+      kitFilter.some(
+        (k) => d.includes(`${OUTPUT}\\${k}\\`) || d.includes(`${OUTPUT}/${k}/`),
+      ),
+    );
   }
   return dirs;
+}
+
+/** Prefer default.glb when it looks embedded (big enough); else lod0. */
+function pickBakeSource(outDir) {
+  const def = join(outDir, 'default.glb');
+  const lod0 = join(outDir, 'lod0.glb');
+  if (existsSync(def) && statSync(def).size >= MIN_BYTES) {
+    // Tiny default usually means broken / external-only stub
+    const head = readFileSync(def).subarray(0, Math.min(statSync(def).size, 2_000_000));
+    const text = head.toString('latin1');
+    const hasPng = /image\/png|image\/jpeg/.test(text);
+    const hasKtx = /KHR_texture_basisu|KTX2/.test(text);
+    if (hasPng && !hasKtx) {
+      return { path: def, label: 'default' };
+    }
+  }
+  if (existsSync(lod0) && statSync(lod0).size >= MIN_BYTES) {
+    return { path: lod0, label: 'lod0' };
+  }
+  return null;
 }
 
 function patchAssetJson(outDir, meta) {
@@ -76,12 +97,15 @@ function patchAssetJson(outDir, meta) {
     hemi: meta.hemi !== false,
     resolution: meta.atlasSize ?? ATLAS,
     mode: 'octahedral',
+    source: meta.source || 'default',
   };
   writeFileSync(path, JSON.stringify(asset, null, 2));
 }
 
 const assets = listAssetDirs();
-console.log(`KitBash impostor rebake — ${assets.length} candidate(s), ${ATLAS}px / ${FRAMES}×${FRAMES}`);
+console.log(
+  `KitBash impostor rebake — ${assets.length} candidate(s), ${ATLAS}px / ${FRAMES}×${FRAMES} (prefer default.glb)`,
+);
 if (!assets.length) {
   console.log('Nothing to do.');
   process.exit(0);
@@ -93,10 +117,9 @@ let fail = 0;
 
 for (const outDir of assets) {
   const rel = outDir.slice(OUTPUT.length + 1);
-  const lod0 = join(outDir, 'lod0.glb');
-  const bytes = statSync(lod0).size;
-  if (bytes < MIN_LOD0_BYTES) {
-    console.log(`\nSKIP ${rel} — lod0 too small (${bytes} B), re-convert first`);
+  const src = pickBakeSource(outDir);
+  if (!src) {
+    console.log(`\nSKIP ${rel} — no default/lod0 bake source`);
     skip++;
     continue;
   }
@@ -106,12 +129,13 @@ for (const outDir of assets) {
     continue;
   }
 
-  console.log(`\n→ ${rel} (lod0 ${(bytes / (1024 * 1024)).toFixed(1)} MB)`);
+  const mb = (statSync(src.path).size / (1024 * 1024)).toFixed(1);
+  console.log(`\n→ ${rel} from ${src.label} (${mb} MB)`);
   const stageDir = join(tmpdir(), `hp-impostor-${Date.now()}-${ok + fail}`);
   mkdirSync(stageDir, { recursive: true });
   try {
     const result = await generateOctahedralImpostor({
-      inputGlb: lod0,
+      inputGlb: src.path,
       outputGlb: join(outDir, 'impostor.glb'),
       outDir,
       stageDir,
@@ -123,6 +147,7 @@ for (const outDir of assets) {
       frames: result.frames,
       atlasSize: result.atlasSize,
       hemi: true,
+      source: src.label,
     });
     console.log(`  OK ${rel}`);
     ok++;

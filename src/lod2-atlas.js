@@ -2,13 +2,13 @@
  * P2: LOD2 unique-UV + single 1024px PBR atlas bake.
  * watlas → TEXCOORD_1, Blender Cycles bake (albedo/normal/ORM), QC gate.
  */
-import { spawnSync } from 'node:child_process';
-import { copyFileSync, existsSync, mkdirSync } from 'node:fs';
+import { existsSync, mkdirSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { unwrap } from '@gltf-transform/functions';
 import * as watlas from 'watlas';
 import { resolveBlender, ROOT } from './convert.js';
 import { validateAtlasBake } from './atlas-qc.js';
+import { spawnAsync } from './spawn-async.js';
 
 /**
  * @param {object} options
@@ -63,7 +63,7 @@ export async function bakeLod2Atlas(options) {
 
   const script = join(ROOT, 'scripts', 'blender_lod2_atlas_bake.py');
   console.log(`  LOD2: Blender atlas bake ${resolution}px`);
-  const r = spawnSync(
+  const r = await spawnAsync(
     bin,
     [
       '--background',
@@ -79,10 +79,7 @@ export async function bakeLod2Atlas(options) {
       '--resolution',
       String(resolution),
     ],
-    {
-      encoding: 'utf8',
-      maxBuffer: 256 * 1024 * 1024,
-    },
+    { maxBuffer: 256 * 1024 * 1024 },
   );
 
   if (r.status !== 0 || !existsSync(bakedGlb)) {
@@ -97,7 +94,13 @@ export async function bakeLod2Atlas(options) {
     throw new Error(`LOD2 atlas QC rejected — ${qc.reason}`);
   }
 
-  copyFileSync(bakedGlb, outputGlb);
+  // Blender exports the atlas material as BLEND+doubleSided; with fully-opaque
+  // alpha that only buys depth-sorting artifacts (see-through facades). Force OPAQUE.
+  const bakedDoc = await io.read(bakedGlb);
+  for (const mat of bakedDoc.getRoot().listMaterials()) {
+    mat.setAlphaMode('OPAQUE');
+  }
+  await io.write(outputGlb, bakedDoc);
   console.log(
     `  LOD2: atlas OK (luma ${qc.meanLuminance?.toFixed(3)}, uvArea ${qc.uvFaceAreaSum?.toFixed(3)})`,
   );

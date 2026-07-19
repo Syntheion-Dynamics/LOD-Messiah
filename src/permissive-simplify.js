@@ -1,4 +1,5 @@
 import { MeshoptSimplifier } from 'meshoptimizer';
+import { isGlassOrEmissiveMaterial } from './glass-materials.js';
 
 const TRIANGLES = 4;
 /** meshopt_SimplifyVertex_Protect — keep UV seams under Permissive mode */
@@ -9,22 +10,39 @@ const VERTEX_PROTECT = 2;
  * Does NOT weld-average UVs — Protects UV discontinuities at shared positions.
  *
  * @param {import('@gltf-transform/core').Document} document
- * @param {{ ratio: number, error?: number, pruneError?: number, protectUv?: boolean }} options
+ * @param {{ ratio: number, error?: number, pruneError?: number, protectUv?: boolean, protectGlass?: boolean }} options
  */
 export async function permissiveSimplify(document, options) {
-  const { ratio, error = 0.01, pruneError = 0.01, protectUv = true } = options;
+  const {
+    ratio,
+    error = 0.01,
+    pruneError = 0.01,
+    protectUv = true,
+    protectGlass = false,
+  } = options;
   await MeshoptSimplifier.ready;
 
   const logger = document.getLogger();
   let primCount = 0;
   let srcTris = 0;
   let dstTris = 0;
+  let skippedPrims = 0;
+  let skippedTris = 0;
 
   for (const mesh of document.getRoot().listMeshes()) {
     for (const prim of mesh.listPrimitives()) {
       if (prim.getMode() !== TRIANGLES) continue;
       const before = countTris(prim);
       srcTris += before;
+
+      if (protectGlass && isGlassOrEmissiveMaterial(prim.getMaterial())) {
+        skippedPrims += 1;
+        skippedTris += before;
+        dstTris += before;
+        primCount += 1;
+        continue;
+      }
+
       simplifyPrimitive(document, prim, ratio, error, pruneError, protectUv);
       const after = countTris(prim);
       dstTris += after;
@@ -37,7 +55,13 @@ export async function permissiveSimplify(document, options) {
     }
   }
 
-  return { primCount, srcTris, dstTris };
+  if (protectGlass && skippedPrims > 0) {
+    logger.info?.(
+      `permissiveSimplify: protected glass/emissive ${skippedPrims} prims / ${skippedTris.toLocaleString()} tris`,
+    );
+  }
+
+  return { primCount, srcTris, dstTris, skippedPrims, skippedTris };
 }
 
 function countTris(prim) {
