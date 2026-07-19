@@ -1,0 +1,40 @@
+# Dependencies & local tooling
+node_modules/
+tools.config.json
+tools.config.local.json
+.DS_Store
+Thumbs.db
+*.log
+npm-debug.log*
+
+# Cook outputs (regenerate with npm run convert)
+output/
+gallery/_cache/
+
+# Source KitBash / high-poly libraries — DO NOT commit (license + size)
+Kitbash Assets/
+KitBash Assets/
+kitbash/
+*.glb
+*.gltf
+*.fbx
+input/**/*.glb
+input/**/*.gltf
+input/**/*.fbx
+input/**/*.obj
+input/**/*.bin
+input/**/*.png
+input/**/*.jpg
+input/**/*.jpeg
+
+# Temp / OS
+tmp/
+temp/
+.hp-pipeline-*/
+*.tmp
+
+# Editor
+.idea/
+.vscode/
+*.swp
+.claude/

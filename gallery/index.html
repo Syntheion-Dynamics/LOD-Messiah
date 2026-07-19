@@ -1,0 +1,443 @@
+<!DOCTYPE html>
+<html lang="cs">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Cook gallery — LOD + impostor</title>
+  <style>
+    :root {
+      --bg: #141416;
+      --panel: #1c1c20;
+      --line: #2e2e34;
+      --text: #e8e8ec;
+      --muted: #9a9aa3;
+      --ok: #3d9a6a;
+      --warn: #c4a35a;
+      --bad: #b55a5a;
+      --accent: #6a9fbf;
+    }
+    * { box-sizing: border-box; }
+    html, body {
+      margin: 0;
+      height: 100%;
+      background: var(--bg);
+      color: var(--text);
+      font: 14px/1.45 "Segoe UI", system-ui, sans-serif;
+    }
+    .app {
+      display: grid;
+      grid-template-columns: 320px 1fr;
+      height: 100%;
+    }
+    aside {
+      border-right: 1px solid var(--line);
+      background: var(--panel);
+      display: flex;
+      flex-direction: column;
+      min-width: 0;
+    }
+    header {
+      padding: 16px 16px 12px;
+      border-bottom: 1px solid var(--line);
+    }
+    header h1 {
+      margin: 0 0 4px;
+      font-size: 16px;
+      font-weight: 600;
+    }
+    header p {
+      margin: 0;
+      color: var(--muted);
+      font-size: 12px;
+    }
+    .toolbar {
+      padding: 10px 12px;
+      border-bottom: 1px solid var(--line);
+      display: flex;
+      gap: 8px;
+    }
+    input[type="search"] {
+      flex: 1;
+      background: var(--bg);
+      border: 1px solid var(--line);
+      color: var(--text);
+      border-radius: 6px;
+      padding: 8px 10px;
+      outline: none;
+    }
+    input[type="search"]:focus { border-color: var(--accent); }
+    button {
+      background: var(--bg);
+      border: 1px solid var(--line);
+      color: var(--text);
+      border-radius: 6px;
+      padding: 8px 10px;
+      cursor: pointer;
+    }
+    button:hover { border-color: var(--accent); }
+    .list {
+      overflow: auto;
+      flex: 1;
+      padding: 8px;
+    }
+    .item {
+      width: 100%;
+      text-align: left;
+      padding: 10px 12px;
+      margin-bottom: 6px;
+      border-radius: 8px;
+      border: 1px solid transparent;
+      background: transparent;
+      display: block;
+    }
+    .item:hover { background: #232328; }
+    .item.active {
+      background: #242a30;
+      border-color: #3a4a55;
+    }
+    .item .name {
+      font-weight: 600;
+      word-break: break-word;
+      margin-bottom: 4px;
+    }
+    .meta {
+      color: var(--muted);
+      font-size: 12px;
+      display: flex;
+      flex-wrap: wrap;
+      gap: 6px 10px;
+    }
+    .pill {
+      display: inline-block;
+      font-size: 11px;
+      padding: 1px 7px;
+      border-radius: 999px;
+      border: 1px solid var(--line);
+      color: var(--muted);
+    }
+    .pill.ok { color: var(--ok); border-color: #2f5f46; }
+    .pill.warn { color: var(--warn); border-color: #6a5830; }
+    .pill.bad { color: var(--bad); border-color: #6a3434; }
+
+    main {
+      display: grid;
+      grid-template-rows: auto 1fr;
+      min-width: 0;
+      min-height: 0;
+    }
+    .detail-head {
+      padding: 16px 20px;
+      border-bottom: 1px solid var(--line);
+      display: flex;
+      justify-content: space-between;
+      gap: 16px;
+      align-items: flex-start;
+    }
+    .detail-head h2 {
+      margin: 0 0 6px;
+      font-size: 20px;
+      font-weight: 600;
+      word-break: break-word;
+    }
+    .stats {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 8px 16px;
+      color: var(--muted);
+      font-size: 13px;
+    }
+    .actions { display: flex; gap: 8px; flex-shrink: 0; }
+    .actions a, .actions button {
+      text-decoration: none;
+      color: var(--text);
+      display: inline-flex;
+      align-items: center;
+    }
+    .body {
+      display: grid;
+      grid-template-columns: 280px 1fr;
+      min-height: 0;
+    }
+    .side-panel {
+      border-right: 1px solid var(--line);
+      padding: 16px;
+      overflow: auto;
+    }
+    .side-panel h3 {
+      margin: 0 0 10px;
+      font-size: 12px;
+      text-transform: uppercase;
+      letter-spacing: 0.04em;
+      color: var(--muted);
+      font-weight: 600;
+    }
+    .thumb-wrap {
+      border: 1px solid var(--line);
+      border-radius: 8px;
+      background: #0e0e10;
+      aspect-ratio: 1;
+      overflow: hidden;
+      margin-bottom: 14px;
+    }
+    .thumb-wrap img {
+      width: 100%;
+      height: 100%;
+      object-fit: contain;
+      image-rendering: auto;
+    }
+    .empty-thumb {
+      height: 100%;
+      display: grid;
+      place-items: center;
+      color: var(--muted);
+      font-size: 13px;
+      padding: 16px;
+      text-align: center;
+    }
+    table {
+      width: 100%;
+      border-collapse: collapse;
+      font-size: 13px;
+    }
+    th, td {
+      text-align: left;
+      padding: 6px 0;
+      border-bottom: 1px solid var(--line);
+    }
+    th { color: var(--muted); font-weight: 500; }
+    td.num { text-align: right; font-variant-numeric: tabular-nums; }
+    .preview-frame {
+      min-height: 0;
+      position: relative;
+      background: #111114;
+    }
+    .preview-frame iframe {
+      border: 0;
+      width: 100%;
+      height: 100%;
+      display: block;
+    }
+    .placeholder {
+      height: 100%;
+      display: grid;
+      place-items: center;
+      color: var(--muted);
+      padding: 24px;
+      text-align: center;
+      line-height: 1.6;
+    }
+    .err {
+      padding: 24px;
+      color: var(--bad);
+    }
+    @media (max-width: 960px) {
+      .app { grid-template-columns: 1fr; grid-template-rows: 40% 60%; }
+      aside { border-right: 0; border-bottom: 1px solid var(--line); }
+      .body { grid-template-columns: 1fr; }
+      .side-panel { border-right: 0; border-bottom: 1px solid var(--line); max-height: 240px; }
+    }
+  </style>
+</head>
+<body>
+  <div class="app">
+    <aside>
+      <header>
+        <h1>Cook gallery</h1>
+        <p>Seznam z <code>output/</code> — LOD čísla + náhled impostoru</p>
+      </header>
+      <div class="toolbar">
+        <input id="q" type="search" placeholder="Filtrovat…" />
+        <button id="reload" type="button" title="Obnovit">↻</button>
+      </div>
+      <div class="list" id="list"></div>
+    </aside>
+    <main>
+      <div class="detail-head" id="head">
+        <div>
+          <h2>Vyber asset vlevo</h2>
+          <div class="stats" id="summary">Po cooku uvidíš, jestli impostor a LOD dávají smysl — bez Blenderu.</div>
+        </div>
+        <div class="actions" id="actions"></div>
+      </div>
+      <div class="body">
+        <div class="side-panel">
+          <h3>Impostor atlas</h3>
+          <div class="thumb-wrap" id="thumb">
+            <div class="empty-thumb">Žádný výběr</div>
+          </div>
+          <h3>LOD chain</h3>
+          <div id="lodTable"><p class="meta">—</p></div>
+        </div>
+        <div class="preview-frame" id="preview">
+          <div class="placeholder">
+            Orbit preview impostoru se otevře tady.<br />
+            Myší otáčej — tohle je chování enginu (Blender ukáže jen flat quad).
+          </div>
+        </div>
+      </div>
+    </main>
+  </div>
+  <script type="module">
+    const listEl = document.getElementById('list');
+    const qEl = document.getElementById('q');
+    const thumbEl = document.getElementById('thumb');
+    const lodTableEl = document.getElementById('lodTable');
+    const previewEl = document.getElementById('preview');
+    const summaryEl = document.getElementById('summary');
+    const actionsEl = document.getElementById('actions');
+    const headTitle = document.querySelector('#head h2');
+
+    let assets = [];
+    let selected = null;
+
+    function fmt(n) {
+      if (n == null || Number.isNaN(n)) return '—';
+      return Number(n).toLocaleString('cs-CZ');
+    }
+
+    function fmtMb(n) {
+      if (n == null || Number.isNaN(n)) return '—';
+      return `${Number(n).toFixed(1)} MB`;
+    }
+
+    async function load() {
+      const res = await fetch('/api/assets');
+      if (!res.ok) throw new Error(`API ${res.status}`);
+      const data = await res.json();
+      assets = data.assets || [];
+      renderList();
+      if (selected) {
+        const again = assets.find((a) => a.name === selected.name);
+        if (again) select(again);
+        else if (assets[0]) select(assets[0]);
+      } else if (assets[0]) {
+        select(assets[0]);
+      }
+    }
+
+    function filtered() {
+      const q = qEl.value.trim().toLowerCase();
+      if (!q) return assets;
+      return assets.filter((a) => a.name.toLowerCase().includes(q));
+    }
+
+    function renderList() {
+      const rows = filtered();
+      if (!rows.length) {
+        listEl.innerHTML = `<div class="err">Žádné assety v output/. Spusť nejdřív convert.</div>`;
+        return;
+      }
+      listEl.innerHTML = rows
+        .map((a) => {
+          const active = selected && selected.name === a.name ? 'active' : '';
+          const imp = a.hasAtlas
+            ? `<span class="pill ok">impostor</span>`
+            : `<span class="pill warn">bez impostoru</span>`;
+          const lod0 = a.lods?.[0];
+          return `
+            <button class="item ${active}" type="button" data-name="${a.name}">
+              <div class="name">${a.name}</div>
+              <div class="meta">
+                ${imp}
+                <span>LOD0 ${fmt(lod0?.tris ?? null)} tris</span>
+                <span>${fmtMb(lod0?.mb)}</span>
+              </div>
+            </button>`;
+        })
+        .join('');
+
+      listEl.querySelectorAll('.item').forEach((btn) => {
+        btn.addEventListener('click', () => {
+          const a = assets.find((x) => x.name === btn.dataset.name);
+          if (a) select(a);
+        });
+      });
+    }
+
+    function select(a) {
+      selected = a;
+      renderList();
+      headTitle.textContent = a.name;
+
+      const parts = [
+        a.beforeTris != null ? `source/join ${fmt(a.beforeTris)} tris` : null,
+        a.materialsAfter != null
+          ? `mat ${fmt(a.materialsBefore)}→${fmt(a.materialsAfter)}`
+          : null,
+        a.texturesAfter != null
+          ? `tex ${fmt(a.texturesBefore)}→${fmt(a.texturesAfter)}`
+          : null,
+        a.ktx2 ? 'KTX2' : null,
+        a.atlasUsed ? 'atlas used' : 'atlas off',
+      ].filter(Boolean);
+      summaryEl.textContent = parts.join(' · ') || 'Bez report.json — jen soubory na disku.';
+
+      actionsEl.innerHTML = '';
+      if (a.hasPreview) {
+        const open = document.createElement('a');
+        open.href = a.impostor.previewUrl;
+        open.target = '_blank';
+        open.rel = 'noopener';
+        open.textContent = 'Otevřít preview';
+        open.style.cssText =
+          'border:1px solid var(--line);border-radius:6px;padding:8px 10px;';
+        actionsEl.appendChild(open);
+      }
+      if (a.hasLod0) {
+        const lod = document.createElement('a');
+        lod.href = `/files/${encodeURIComponent(a.name)}/lod0.glb`;
+        lod.download = `${a.name}_lod0.glb`;
+        lod.textContent = 'LOD0.glb';
+        lod.style.cssText =
+          'border:1px solid var(--line);border-radius:6px;padding:8px 10px;';
+        actionsEl.appendChild(lod);
+      }
+
+      if (a.hasAtlas) {
+        thumbEl.innerHTML = `<img src="${a.impostor.atlasUrl}?t=${Date.now()}" alt="impostor atlas" />`;
+      } else {
+        thumbEl.innerHTML = `<div class="empty-thumb">Impostor atlas chybí.<br/>Spusť convert bez --no-impostor.</div>`;
+      }
+
+      if (a.lods?.length) {
+        lodTableEl.innerHTML = `
+          <table>
+            <thead><tr><th>LOD</th><th class="num">Tris</th><th class="num">MB</th></tr></thead>
+            <tbody>
+              ${a.lods
+                .map(
+                  (l) =>
+                    `<tr><td>${l.label}</td><td class="num">${fmt(l.tris)}</td><td class="num">${fmtMb(l.mb)}</td></tr>`,
+                )
+                .join('')}
+              ${
+                a.impostor
+                  ? `<tr><td>Impostor</td><td class="num">2</td><td class="num">${fmtMb(a.impostor.mb)}</td></tr>`
+                  : ''
+              }
+            </tbody>
+          </table>`;
+      } else {
+        lodTableEl.innerHTML = `<p class="meta">Žádná LOD data v report.json</p>`;
+      }
+
+      if (a.hasPreview) {
+        previewEl.innerHTML = `<iframe title="impostor preview" src="${a.impostor.previewUrl}"></iframe>`;
+      } else if (a.hasAtlas) {
+        previewEl.innerHTML = `<div class="placeholder">Atlas je, ale chybí preview.html.<br/>Otevři atlas vlevo — orbit preview není k dispozici.</div>`;
+      } else {
+        previewEl.innerHTML = `<div class="placeholder">Bez impostoru zatím neukážu orbit náhled.<br/>LOD čísla vlevo pořád platí — asset můžeš mít v enginu s LOD chainem.</div>`;
+      }
+    }
+
+    qEl.addEventListener('input', renderList);
+    document.getElementById('reload').addEventListener('click', () => load().catch(showErr));
+
+    function showErr(err) {
+      listEl.innerHTML = `<div class="err">${err.message}<br/>Běží gallery server? (npm run gallery)</div>`;
+    }
+
+    load().catch(showErr);
+  </script>
+</body>
+</html>

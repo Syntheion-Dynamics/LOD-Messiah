@@ -1,0 +1,4 @@
+{
+  "blender": "C:\\Program Files\\Blender Foundation\\Blender 5.1\\blender.exe",
+  "comment": "Copy to tools.config.json and adjust path. Or set BLENDER_PATH / --blender."
+}
