@@ -150,12 +150,13 @@ Self-contained materiály LOD3 **nesdílí** sloty s LOD0 (1 mat vs desítky). E
     "resolution": 4096,
     "mode": "octahedral"
   },
-  "sharedTextures": false
+  "sharedTextures": true,
+  "sharedTextureFiles": ["18b2b14383d9b0ad.png", "…"]
 }
 ```
 
-`sharedTextures: false` = textury jsou v `lod0.glb` (engine-safe default).  
-`true` by znamenalo `output/_textures/` + external URI — **nepoužívej**, dokud engine neumí external glTF URI.
+`sharedTextures: false` = textury embedded v `lod0.glb`.  
+`sharedTextures: true` = per-kit pool `output/<Kit>/_shared/textures/<sha1>.png` + external URI v `default.glb` / `lod0.glb` (např. `../_shared/textures/<hash>.png`). Engine řeší URI vůči složce GLB (`GltfImageDecodeCache`). Lod2/lod3 atlasy zůstávají embedded. Ship kopíruje `_shared/` **jednou** za kit.
 
 ---
 
@@ -265,7 +266,7 @@ Pozn.: může existovat **flat i nested** (`output/Office_Plaza` i `output/Manha
 | `--max-texture 2048` | Cap albedo; normal/ORM ≤ 1024 |
 | `--no-impostor` | Rychlejší cook, jen mesh LODy |
 | `--no-lod2-atlas` | lod2 = geometry-only jako lod1 |
-| `--shared-textures` | **Nevypínat default off** dokud engine neumí external URI |
+| `--shared-textures` | **Zapnuto** v `convert-kitbash*.bat` — kit `_shared/textures/` + external URI |
 
 ---
 
@@ -285,7 +286,7 @@ Pozn.: může existovat **flat i nested** (`output/Office_Plaza` i `output/Manha
 - Decimaci / bake / KTX2 decode v enginu „protože TOOL to umí“.
 - Brát `impostor.glb` jako běžný mesh LOD bez octa shaderu.
 - Očekávat, že Blender ukáže impostor správně.
-- Používat `sharedTextures: true` bez URI loaderu.
+- Zapomenout shipnout `Assets/Buildings/<Kit>/_shared/` spolu s budovami.
 - Míchat flat `output/Office_Plaza` a nested `output/Manhattan/Office_Plaza` jako dva různé hero assety bez důvodu.
 
 ### Až později (impostor)

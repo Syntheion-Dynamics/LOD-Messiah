@@ -1,6 +1,6 @@
 # Stav LOD Messiah → Bungáč (pro architekta)
 
-> Datum: 2026-07-19  
+> Datum: 2026-07-19 (večer — LOD3 **boxcards** nasazeno)  
 > Ty nejsi programátor — tohle je mapa „co máme / kde klikat / co ještě bolí“.  
 > **Důležité zjištění z Blenderu:** LOD2 vypadá bíle (bez textur) = OK u geo-only. Okna na LOD0/1/2 = glass-safe simplify (§4.2).
 
@@ -9,7 +9,8 @@
 ## 1. Jednou větou
 
 Kitbash se **peče offline** v TOOL. Hra jen načte hotové soubory.  
-Hlavní vzorek: **Office_Plaza** (nashipovaná včetně LOD3 v2 MASK). QC siluety: Blender → Force LOD 3 ve hře.
+**LOD3 = 6 placek na AABB** (fotka každé strany, MASK) — varianta A.  
+Vzorky: **Office_Plaza** + **Brooklyn_Luxury_Flats** (připečené). QC: Blender orbit → Force LOD 3 ve hře.
 
 ---
 
@@ -23,12 +24,13 @@ Kořen: `C:\Users\yukit\Downloads\TOOL`
 | Koupené zdroje | `Kitbash Assets\` (Brooklyn, Every City, Manhattan, …) |
 | Uvařené výstupy | `output\<Kit>\<Asset>\` např. `output\Manhattan\Office_Plaza\` |
 | Náhled ve webovce | `gallery.bat` → http://127.0.0.1:4173 |
-| Cook 1 budovy | `convert-kitbash.bat` |
+| Cook 1 budovy | `convert-kitbash.bat` *(už boxcards + bez legacy impostoru)* |
 | Cook celý kit | `convert-kitbash-all.bat` |
+| Jen LOD3 znovu (rychlé) | `rebake-lod3-kitbash.bat Manhattan` |
 | Kopíruj do hry | `ship-to-engine.bat Manhattan\Office_Plaza` |
 | Návod pro AI enginu | `docs\AI_ENGINE_WIREUP.md` |
-| Research LOD3 (silueta, alpha, prostředek) | `docs\RESEARCH_LOD3_silhouette_math.md` |
 | Tento stav | `docs\ARCHITECT_LOD_STATUS.md` |
+| Starý impostor / hull | `legacy\` (opt-in, default off) |
 
 ### Co je ve složce assetu (příklad Office_Plaza)
 
@@ -38,9 +40,9 @@ output\Manhattan\Office_Plaza\
   lod0.glb        ← runtime blízko (mesh + textury)
   lod1.glb        ← střední vzdálenost (jen geometrie)
   lod2.glb        ← dál (jen geometrie u našeho cooku)
-  lod3.glb        ← silueta v2 (MASK alpha, height-slice / hull)
-  lod3_atlas\     ← albedo siluety
-  asset.json      ← seznam LODů
+  lod3.glb        ← 6 AABB placek + MASK atlas (boxcards, ~12 tris)
+  lod3_atlas\     ← albedo (RGBA, A = coverage)
+  asset.json      ← seznam LODů + blok "lod3": { backend: "boxcards" }
   report.json     ← QA čísla
 ```
 
@@ -63,9 +65,9 @@ File → Import → glTF → vyber `lod0.glb` / `lod1.glb` / `lod2.glb` / `lod3.
 | Ship script do Assets | ✅ | day-1 bez default/impostor |
 | Engine: načte lod0 + sourozence | ✅ | Force LOD 0/1/2/3 v DEBUG |
 | Engine: lod1 bere textury z lod0 | ✅ | podle jména materiálů |
-| LOD3 height-slice + MASK (v2) | ✅ | P0+P1 cook; Office_Plaza shipped |
-| Engine MASK cutout pro LOD3 | ✅ | 19.07 — bez mipů + clamp UV na self-contained |
-| Octahedral impostor bake | ⚠️ | v gallery OK-ish; ve hře shader **ne** |
+| LOD3 boxcards (6 placek + MASK) | ✅ | Varianta A; Office_Plaza + Brooklyn_Luxury_Flats připečeno |
+| Engine MASK cutout pro LOD3 | ✅ | bez mipů + clamp UV na self-contained |
+| Octahedral impostor bake | ⏸ legacy | v `legacy\`; default cook **vypnutý** (čeká Vulkan shader) |
 | Celý Kitbash uvařený | ❌ | jen vzorky (Office_Plaza, Energy_Office, …) |
 | Shared textury napříč kitem | ❌ | default off (každá budova nese vlastní PNG) |
 
@@ -138,46 +140,45 @@ Když v Blenderu chceš vidět LOD2 s texturami, musíš buď:
 
 ---
 
-## 5. LOD3 silueta — co je a co není
+## 5. LOD3 = boxcards (varianta A) — hotovo 19.07 večer
 
 | | |
 |---|---|
-| Cíl | Levná 3D silueta na dálku (ne octa placka) |
-| Teď | **v2** height-slice (nebo visual-hull) + **MASK** alpha bake (`alphaCutoff` 0.5) |
-| Research | `docs\RESEARCH_LOD3_silhouette_math.md` |
-| Engine (19.07 večer) | MASK cutout + bez mipů + clamp UV na self-contained; Office_Plaza **znovu nashipovaná** |
-| QC | Blender (tvar + díry ve vzduchu) → pak Force LOD 3 ve hře |
+| Co to je | **6 quadů** na stěnách AABB (±X ±Y ±Z), každá = ortho fotka plného meshe |
+| Proč | Dutá Kitbash skořápka / podlaha / římsy **nevadí** — nefotíme geometrii, fotíme vzhled zvenku |
+| Tris | vždy **12** (6×2) |
+| Materiál | `Lod3SilhouetteMaterial`, `MASK`, cutoff `0.5` |
+| Atlas | jeden `lod3_atlas/albedo.png` (mřížka 3×2 + padding) + embedded v GLB |
+| `asset.json` | `"lod3": { "backend": "boxcards", "alphaMode": "MASK", … }` |
+| Engine | stejný MASK kontrakt jako dřív — **neměnit** loader kvůli boxcards |
+| Starý hull/slice | `legacy\lod3-silhouette\` (nepoužívat) |
 
-**Co máš vidět u Office_Plaza (po shipu):** ~100+ tris (ne 44), průhledný vzduch přes alpha (ne černý box), stupňovitá silueta.
+**Co máš vidět v Blenderu:** krabice ze **všech** stran (ne jedna placka). Z ~45° uvidíš hrany karet — to je očekávané u A.
 
-### 5.1 ⚠️ POTŘEBUJE ROZHODNUTÍ ARCHITEKTA (19.07 večer) — rozbité LOD3 u části Kitbashe
+**QC vzorky teď:**
+1. `output\Manhattan\Office_Plaza\lod3.glb`
+2. `output\Brooklyn\Brooklyn_Luxury_Flats\lod3.glb` (dřív rozbitá silueta)
 
-**Problém (ověřeno v Blenderu):** u některých budov (např. `Brooklyn_Luxury_Flats`) je `lod3.glb` vizuálně rozbitý — místo budovy jen **fragmenty fasád / říms / okenních rámů**. Cook to přitom **pustí** (tris v limitu, report = OK). Office_Plaza a podobné masy vypadají lépe; duté Kitbash pláště ne.
+Pak `ship-to-engine.bat …` → Force LOD 3. Když stará textura: smaž `.cache\texcache`.
 
-**Proč to bolí (bez programátorské omáčky):**
-- Kitbash = často **dutá skořápka** (stěny ano, vnitřek ne) + **podlaha / chodník / base plate**.
-- Současná 3D silueta (height-slice / visual-hull) z toho skládá obrys z bodů meshe → u duté fasády vycházejí tenké „rámečky“, ne hmota.
-- **Odstranit podlahu pomůže**, ale nestačí: římsy, sloupy, balkony, okenní šambrány stejně zkreslí footprint. Čím víc architektonického bordelu na plášti, tím horší 3D silueta z raw meshe.
+### 5.1 Rozhodnutí — **A přijato a uvařeno**
 
-**Silueta jako idea není těžká.** Těžké je spolehlivě ji uvařit z Kitbash GLB bez ručního čištění každé budovy.
+Dřívější volby B/C/D zůstávají v historii; default cook je **A**.  
+Engine práce navíc: **0** (MASK už umí). Octa impostor = později, ne day-1.
 
-#### Varianty — vyber jednu (nebo hybrid)
+### 5.2 Bat soubory (root TOOL) — už nastavené
 
-| Volba | Co to je | Výhody | Nevýhody | Práce TOOL | Práce engine |
-|---|---|---|---|---|---|
-| **A — 6 placek + fotka strany** *(návrh z QC)* | AABB box: 6 quads (±X ±Y ±Z), každá = ortho render budovy (RGBA / MASK) | Jednoduché, předvídatelné, podlaha/římsy skoro nevadí (jsou „na fotce“), ~12 tris | Z 45° prosvítají hrany karet; není to plný 3D objem | Střední (bake 6 views) | Malá (už umí MASK; 6 materiálů/UV nebo 1 atlas) |
-| **B — hloupá 3D krabice** | 1× convex/AABB footprint × výška (+ volitelně ořez podlahy) | Robustní, vždy „nějaká budova“ | U věží chybí prostředek; římsy pořád nafukují box | Malá | 0 (už jede) |
-| **C — opravovat v2 siluetu** | Lepší footprint (global plan, filtr podlahy, QC „vypadá jako budova“) | Drží směr „3D proxy“ | Pořád křehké u dutých Kitbashů; římsy/sloupy zůstanou edge case | Velká | 0 |
-| **D — LOD3 přeskočit** | Ve hře `lod2 → impostor` (až bude shader) / jen lod2 na dálku | Žádný další pain teď | Chybí levný mid-far stupeň mezi lod2 a impostorem | 0 | Kontrakt LOD řetězce |
+| Bat | Co dělá |
+|---|---|
+| `convert-kitbash.bat` | 1 budova: LOD0/1/2 + LOD3 boxcards, **bez** impostoru |
+| `convert-kitbash-all.bat` | celý kit / jeden kit |
+| `rebake-lod3-kitbash.bat` | **jen** LOD3 (když už máš `default.glb`) — řádově sekundy/budova |
+| `ship-to-engine.bat` | kopie do Assets |
 
-**Doporučení z TOOL strany (ne závazné):** **A (6 placek)** sedí na to, co jsi řekl u Blenderu — „6 placek a fotka toho boku“. Je to blízko box-impostoru, ne komplexní 3D hull. B jako nouzový fallback. C jen pokud trváme na „pravé“ 3D siluetě za cenu dalších cook iterací.
-
-**Doplňující otázky pro tebe:**
-1. Smí LOD3 z 45° vypadat jako karty (A), nebo musí držet objem při orbitě (B/C)?  
-2. Čistíme zdroje (mazat podlahu v Kitbash / Blenderu), nebo má vařič podlahu ignorovat sám?  
-3. Do shipu města: radši **žádné LOD3** u rozbitých assetů, než špatné fragmenty?
-
-**Rozhodnutí:** __________   Datum: __________   Poznámka: __________
+Rychlost (bez velké investice):
+- Jen LOD3: `rebake-lod3-kitbash.bat Manhattan` (ne celý convert)
+- Nižší atlas: `set LOD3_RES=1024` před batem (default 2048)
+- Paralel: `set LOD3_JOBS=3` / `CONVERT_JOBS=7`
 
 ---
 
@@ -185,12 +186,11 @@ Když v Blenderu chceš vidět LOD2 s texturami, musíš buď:
 
 ### Musí dřív než „celé město z Kitbashe“
 
-1. ~~**LOD0/1/2 okna**~~ — ✅ glass-safe na všech LODech; Office_Plaza `glassQc` 100 %.  
-2. **LOD2 vizuál** — Force LOD 2 v enginu (bílá v Blenderu = OK u geo-only).  
-3. ~~**LOD3 v2 v enginu**~~ — ✅ cook + ship + MASK podpora (19.07); živé QC Force LOD 3.  
-3b. **⚠️ LOD3 strategie u Kitbashe** — rozhodnutí §5.1 (6 placek vs krabice vs opravovat v2 vs skip). Do té doby nerozbíjet další budovy „úspěšným“ špatným LOD3.  
-4. **Shared textury per kit** — jinak VRAM zabije 4070 při N budovách.  
-5. Cook + ship dalších budov po jedné (ne celý kit najednou).
+1. ~~**LOD0/1/2 okna**~~ — ✅ glass-safe.  
+2. **LOD2 vizuál** — Force LOD 2 v enginu.  
+3. ~~**LOD3 strategie**~~ — ✅ **A boxcards** uvařeno; QC + re-ship Office_Plaza / Brooklyn.  
+4. **Shared textury per kit** — jinak VRAM.  
+5. Cook + ship dalších budov po jedné.
 
 ### Později
 
@@ -217,7 +217,7 @@ V Blenderu na jedné budově:
 | `lod0.glb` | Skoro jako default, **okna musí zůstat** |
 | `lod1.glb` | Hrubší tvar, v Blenderu často bez textur = OK |
 | `lod2.glb` | Ještě hrubší; bílá v Blenderu = OK pokud `atlas: false` |
-| `lod3.glb` | Silueta s **MASK** alpha; průhledný vzduch (ne černý kvádr) |
+| `lod3.glb` | **6 placek** (krabice) + **MASK**; ze všech stran; z 45° hrany karet = OK |
 
 V gallery: LOD tabulka + velikosti.  
 Ve hře (až budeš chtít): Force LOD 0→3.
@@ -226,11 +226,10 @@ Ve hře (až budeš chtít): Force LOD 0→3.
 
 ## 8. Shrnutí pro tebe
 
-- **LOD3 v2 je v enginu** — Force LOD 3; po shipu očekávej MASK díry + nový tvar (§11).  
-- **⚠️ LOD3 u části Kitbashe je rozbité** (fragmenty fasád) — nepokračovat slepě; **rozhodnutí §5.1** (návrh: 6 placek + fotka strany).  
-- **Okna LOD0/1/2:** glass-safe cook hotový (Office_Plaza 100 %). QC textur LOD1/geo-LOD2 = Force LOD v enginu (§4.0).  
-- QC tvarů v **Blenderu / gallery**; textury LOD1/geo-LOD2 + LOD3 alpha jen **Force LOD v enginu**.  
-- Další krok: rozhodnutí LOD3 strategie → pak shared textury / další budovy.
+- **LOD3 = boxcards (A)** — 6 placek + fotka strany; kontrakt MASK stejný pro engine.  
+- **Vzorky hotové:** Office_Plaza + Brooklyn_Luxury_Flats → Blender orbit → ship → Force LOD 3.  
+- **Okna LOD0/1/2:** glass-safe. QC textur LOD1 = Force LOD v enginu (§4.0).  
+- Další krok: re-ship vzorků + shared textury / další budovy po jedné.
 
 ---
 
@@ -243,7 +242,7 @@ Ve hře (až budeš chtít): Force LOD 0→3.
 | C | QC textur LOD1 = editor Force LOD 1, ne Blender import | [ ] |
 | D | LOD2 s atlasem (`Lod2AtlasMesh`) má vlastní bake — může vypadat hůř než LOD1 | [ ] |
 | E | Glass-safe LOD0/1/2: okna zůstávají (`glassQc` ≥95 % na všech) | [ ] |
-| F | LOD3 strategie (§5.1): A 6 placek / B krabice / C opravovat v2 / D skip | [ ] volba: ___ |
+| F | LOD3 = boxcards (6 placek); z 45° smí být „karty“ | [ ] |
 
 Datum potvrzení: __________   Podpis / poznámka: __________
 
@@ -285,30 +284,25 @@ Review necommitnutých LOD změn v Bungáči (Composer / Bugbot). Tři nálezy, 
 
 ---
 
-## 11. Engine podpora LOD3 v2 (19.07.2026 večer)
+## 11. Engine + LOD3 boxcards (kontrakt beze změny)
 
-TOOL silueta je lepší (height-slice / visual-hull + **MASK** alpha). Engine doplněn tak, aby to ve hře vypadalo stejně ostré.
+TOOL peče boxcards; engine dál jen MASK cutout (bez mipů, clamp UV).
 
-### Co TOOL teď peče
-- `lod3.glb` — 1 materiál `Lod3SilhouetteMaterial`, `alphaMode: MASK`, `alphaCutoff: 0.5`
-- RGBA albedo (coverage v alpha) — embedded v GLB + kopie `lod3_atlas/albedo.png`
-- `asset.json` → blok `"lod3": { "alphaMode": "MASK", "slices": …, "backend": "…" }`
+### Co TOOL peče
+- `lod3.glb` — 6 placek, 1 materiál `Lod3SilhouetteMaterial`, `MASK` / `0.5`
+- `lod3_atlas/albedo.png` + embedded
+- `asset.json` → `"lod3": { "backend": "boxcards", "alphaMode": "MASK", … }`
 
-### Co engine nově dělá
+### Co engine dělá (beze změny oproti v2 MASK)
 | Věc | Proč |
 |---|---|
-| Čte MASK + cutoff (už dřív) | `discard` v shaderu = díry ve vzduchu, ne černý box |
-| **Bez mipmap** u cutout materiálů | Mipy ředí alpha → silueta se na dálku drobí |
-| **Clamp UV** u self-contained MASK | Atlas nemá tiling; REPEAT by bleedoval barvu přes okraj |
-| Re-ship Office_Plaza | Assets mají nový `lod3.glb` (~96 KB) + `lod3_atlas/` |
+| MASK + cutoff | díry ve vzduchu, ne černý box |
+| Bez mipmap u cutout | mipy ředí alpha |
+| Clamp UV | padding mezi dlaždicemi; bez REPEAT bleedu |
 
-### Jak ověřit (ty)
-1. Spusť editor.  
-2. DEBUG → Force LOD **3**.  
-3. Čekáš: stupňovitá / hull silueta, **průhledný vzduch**, ne plný černý kvádr.  
-4. Když pořád stará silueta → smaž `.cache\texcache` (nebo aspoň záznamy Office_Plaza) a načti scénu znovu.
+### Jak ověřit
+1. Blender: import `lod3.glb` — **krabice ze všech stran**, ne jedna placka.  
+2. Editor: Force LOD **3**.  
+3. Stará textura → smaž `.cache\texcache`.
 
-### Soubory v enginu
-`MeshDrawBridge.cs` (DisableMipmaps), `MeshLoader.cs` (clamp u self-LOD MASK), Assets Office_Plaza (ship).
-
-Detailní AI kontrakt: `docs\AI_ENGINE_WIREUP.md` §4.5.
+Detail: `docs\AI_ENGINE_WIREUP.md` §4.5.

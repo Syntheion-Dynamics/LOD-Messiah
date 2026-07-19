@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 /** Quick impostor-only rebake from a PNG-textured GLB (skips LOD/KTX2). */
 import { resolve } from 'node:path';
-import { generateOctahedralImpostor } from '../src/octahedral.js';
+import { generateOctahedralImpostor } from '../legacy/impostor/octahedral.js';
 
 const input = resolve(process.argv[2] || '');
 const outDir = resolve(process.argv[3] || './output/_impostor_tmp');

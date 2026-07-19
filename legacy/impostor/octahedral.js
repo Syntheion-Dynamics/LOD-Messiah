@@ -1,8 +1,6 @@
 /**
- * Hemi-octahedral impostor baker (Ryan Brucks style).
- * Bakes frames² orthographic views into one atlas + a single billboard quad GLB.
- * Runtime needs a custom shader (see runtime/octahedral-impostor.js) — Blender
- * cannot view-dependently sample the atlas.
+ * LEGACY — Hemi-octahedral impostor baker (Ryan Brucks style).
+ * Kept for opt-in `--impostor` / rebake scripts. Default cook uses LOD3 boxcards.
  */
 import {
   mkdirSync,
@@ -16,7 +14,7 @@ import { dirname, join, extname } from 'node:path';
 import { createServer } from 'node:http';
 import { Document, NodeIO } from '@gltf-transform/core';
 import { ALL_EXTENSIONS } from '@gltf-transform/extensions';
-import { ROOT } from './convert.js';
+import { ROOT } from '../../src/convert.js';
 
 /**
  * @param {object} options

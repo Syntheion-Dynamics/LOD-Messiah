@@ -69,10 +69,10 @@ const TEX_CAP_ORM = 1024;
  * @property {boolean} impostorTop
  * @property {boolean} [lod2Atlas] default true — bake unique UV + 1024 atlas on last LOD
  * @property {number} [lod2AtlasRes]
- * @property {boolean} [lod3Silhouette] default true — height-slice shell + MASK albedo
- * @property {number} [lod3Res]
- * @property {number} [lod3Slices] max adaptive A(z) bands (default 8)
- * @property {'visual-hull'|'slices'} [lod3Method]
+ * @property {boolean} [lod3Silhouette] default true — 6-plane boxcards + MASK atlas
+ * @property {number} [lod3Res] atlas edge px (default 2048)
+ * @property {number} [lod3Slices] ignored (legacy CLI compat)
+ * @property {string} [lod3Method] ignored (legacy CLI compat; always boxcards)
  * @property {boolean} hero
  * @property {boolean} ktx2
  * @property {number} [jobs] parallel assets (default 1)
@@ -84,10 +84,9 @@ export async function processAsset(assetPath, options) {
   mkdirSync(outDir, { recursive: true });
 
   const workDir = makeWorkDir(outDir);
-  // Embedded is the engine-safe default; external `_textures/` URIs are opt-in
-  // until the engine loader supports glTF external images.
+  // Opt-in: external URIs into per-kit `_shared/textures/<sha1>.png` (engine resolves vs GLB dir).
   const sharedTextures = options.sharedTextures === true;
-  const texturesDir = pathJoin(options.output, '_textures');
+  const texturesDir = resolveSharedTexturesDir(options.output, stem);
 
   console.log(`\n→ Processing: ${assetPath}`);
   console.log(`  work dir : ${workDir}`);
@@ -135,7 +134,7 @@ export async function processAsset(assetPath, options) {
     }
 
     // Working copy always keeps textures embedded (LOD + impostor need that).
-    // Public lod0/default get external URIs into kit `_textures/` when sharedTextures.
+    // Public lod0/default get external URIs into kit `_shared/textures/` when sharedTextures.
     const embeddedGlb = pathJoin(workDir, 'embedded.glb');
     await io.write(embeddedGlb, sourceDoc);
     glbPath = embeddedGlb;
@@ -143,9 +142,15 @@ export async function processAsset(assetPath, options) {
     // Fix 5: full-quality model before decimation
     const defaultPath = pathJoin(outDir, 'default.glb');
     let sharedTexStats = null;
+    /** @type {string[]} */
+    let sharedTextureFiles = [];
     if (sharedTextures) {
       const defDoc = await io.read(embeddedGlb);
       sharedTexStats = await externalizeTextures(defDoc, texturesDir, outDir);
+      sharedTextureFiles = mergeSharedTextureFiles(
+        sharedTextureFiles,
+        sharedTexStats.files,
+      );
       console.log(
         `  textures : shared ${sharedTexStats.written} new, ${sharedTexStats.reused} reused → ${texturesDir}`,
       );
@@ -233,7 +238,11 @@ export async function processAsset(assetPath, options) {
         if (sharedTextures) {
           await io.write(embedLod0, doc);
           const pubDoc = await io.read(embedLod0);
-          await externalizeTextures(pubDoc, texturesDir, outDir);
+          const lod0Shared = await externalizeTextures(pubDoc, texturesDir, outDir);
+          sharedTextureFiles = mergeSharedTextureFiles(
+            sharedTextureFiles,
+            lod0Shared.files,
+          );
           await writeGlbPreservingExternalImages(io, pubDoc, lodPath, workDir);
         } else {
           await io.write(lodPath, doc);
@@ -352,7 +361,7 @@ export async function processAsset(assetPath, options) {
       if (lod2AtlasOk) atlasUsed = true;
     }
 
-    // 5) LOD3 silhouette proxy — height-slice shell + MASK bake (before octahedral impostor)
+    // 5) LOD3 boxcards — 6 AABB quads + ortho atlas (MASK)
     let lod3Info = null;
     if (options.lod3Silhouette !== false) {
       const lod3Source = existsSync(impostorSourceGlb)
@@ -364,16 +373,12 @@ export async function processAsset(assetPath, options) {
         console.warn('  LOD3: skipped — no bake source GLB');
       } else {
         const lod3Res = options.lod3Res ?? 2048;
-        const lod3Slices = options.lod3Slices ?? 8;
-        const lod3Method = options.lod3Method ?? 'visual-hull';
         try {
           lod3Info = await bakeLod3Silhouette({
             inputGlb: lod3Source,
             outDir,
             workDir,
             resolution: lod3Res,
-            slices: lod3Slices,
-            method: lod3Method,
             blender: options.blender,
           });
           const lod3Path = lod3Info.outputGlb;
@@ -386,7 +391,7 @@ export async function processAsset(assetPath, options) {
             stats,
             health: {
               ok: true,
-              msg: `${lod3Info.method || lod3Method} silhouette — ${lod3Info.triangles} tris`,
+              msg: `boxcards — ${lod3Info.triangles} tris`,
             },
             baked: true,
             atlas: true,
@@ -401,9 +406,12 @@ export async function processAsset(assetPath, options) {
       }
     }
 
-    // 6) Impostor — photograph full-quality default (not decimated lod0)
+    // 6) Legacy impostor (opt-in) — octahedral / AABB box; prefer LOD3 boxcards
     let impostorInfo = null;
     if (options.impostor) {
+      console.warn(
+        '  impostor: LEGACY path enabled — default cook uses LOD3 boxcards; see legacy/README.md',
+      );
       const impostorPath = pathJoin(outDir, 'impostor.glb');
       const facesDir = pathJoin(workDir, 'impostor_faces');
       const mode = options.impostorMode || 'octahedral';
@@ -500,6 +508,8 @@ export async function processAsset(assetPath, options) {
     const assetJsonPath = writeAssetJson(outDir, stem, lodResults, impostorInfo, {
       default: 'default.glb',
       sharedTextures,
+      sharedTextureFiles,
+      lod3: lod3Info,
     });
     console.log(`  asset    : ${assetJsonPath}`);
 
@@ -540,8 +550,8 @@ export async function processAsset(assetPath, options) {
         lod2Atlas: options.lod2Atlas !== false,
         atlasUsed,
         lod3Silhouette: options.lod3Silhouette !== false,
-        lod3Slices: options.lod3Slices ?? 8,
-        lod3Method: options.lod3Method ?? 'visual-hull',
+        lod3Res: options.lod3Res ?? 2048,
+        lod3Method: 'boxcards',
         hero: !!options.hero,
         ktx2: options.ktx2 !== false,
         impostor: options.impostor,
@@ -775,7 +785,28 @@ function buildTextureCaps(doc, maxBase) {
 }
 
 /**
- * Extract textures to kit-level `_textures/<sha1>.png` and point URIs at them.
+ * Per-kit shared pool: `output/<Kit>/_shared/textures/`.
+ * Flat stem (no kit) → `output/_shared/textures/`.
+ * @param {string} outputRoot
+ * @param {string} stem e.g. "Manhattan/Office_Plaza" or "Office_Plaza"
+ */
+function resolveSharedTexturesDir(outputRoot, stem) {
+  const parts = stem.split('/').filter(Boolean);
+  if (parts.length >= 2) {
+    return pathJoin(outputRoot, parts[0], '_shared', 'textures');
+  }
+  return pathJoin(outputRoot, '_shared', 'textures');
+}
+
+/** @param {string[]} a @param {string[]} b */
+function mergeSharedTextureFiles(a, b) {
+  const set = new Set(a);
+  for (const f of b) set.add(f);
+  return [...set].sort();
+}
+
+/**
+ * Extract textures to kit-level `_shared/textures/<sha1>.png` and point URIs at them.
  * @param {import('@gltf-transform/core').Document} doc
  * @param {string} texturesDir
  * @param {string} outDir asset folder (for relative URI)
@@ -784,6 +815,8 @@ async function externalizeTextures(doc, texturesDir, outDir) {
   mkdirSync(texturesDir, { recursive: true });
   let written = 0;
   let reused = 0;
+  /** @type {Set<string>} */
+  const files = new Set();
 
   for (const texture of doc.getRoot().listTextures()) {
     const src = texture.getImage();
@@ -804,6 +837,7 @@ async function externalizeTextures(doc, texturesDir, outDir) {
     } else {
       reused++;
     }
+    files.add(fileName);
 
     const uri = relative(outDir, absPath).replace(/\\/g, '/');
     texture.setURI(uri);
@@ -811,7 +845,7 @@ async function externalizeTextures(doc, texturesDir, outDir) {
     texture.setImage(png); // keep bytes so gltf write can decide; we strip on pack
   }
 
-  return { written, reused };
+  return { written, reused, files: [...files].sort() };
 }
 
 /**
@@ -896,9 +930,29 @@ function writeAssetJson(outDir, stem, lodResults, impostorInfo, extra = {}) {
         mode: impostorInfo.mode || 'octahedral',
         gutterPx: impostorInfo.gutterPx ?? null,
         alphaMode: impostorInfo.alphaMode || null,
+        legacy: true,
       };
     }
   }
+
+  let lod3 = null;
+  const lod3Info = extra.lod3;
+  if (lod3Info) {
+    if (lod3Info.ok === false) {
+      lod3 = { ok: false, reason: lod3Info.reason || 'unknown' };
+    } else if (lod3Info.outputGlb || lod3Info.backend) {
+      lod3 = {
+        ok: true,
+        file: 'lod3.glb',
+        atlas: 'lod3_atlas/',
+        triangles: lod3Info.triangles ?? null,
+        resolution: lod3Info.resolution ?? null,
+        backend: lod3Info.backend || 'boxcards',
+        alphaMode: lod3Info.alphaMode || 'MASK',
+      };
+    }
+  }
+
   const asset = {
     name: stem,
     default: extra.default || 'default.glb',
@@ -913,16 +967,22 @@ function writeAssetJson(outDir, stem, lodResults, impostorInfo, extra = {}) {
             maps: l.maps || (l.level === 3 ? 'lod3_atlas/' : 'lod2_atlas/'),
             note:
               l.level === 3
-                ? 'silhouette hull + baked sides; self-contained'
+                ? '6-plane boxcards + MASK atlas; self-contained'
                 : 'self-contained PBR atlas (unique UV)',
           }
         : l.level >= 1
           ? { note: 'geometry-only; materials from lod0' }
           : {}),
     })),
+    lod3,
     impostor,
-    sharedTextures: extra.sharedTextures !== false,
+    sharedTextures: !!extra.sharedTextures,
   };
+  if (asset.sharedTextures) {
+    asset.sharedTextureFiles = Array.isArray(extra.sharedTextureFiles)
+      ? [...extra.sharedTextureFiles].sort()
+      : [];
+  }
   const path = pathJoin(outDir, 'asset.json');
   writeFileSync(path, JSON.stringify(asset, null, 2));
   return path;

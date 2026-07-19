@@ -13,8 +13,9 @@ LOD Messiah — High-Poly → Engine-Ready (KitBash pipeline)
   npm run convert -- -i <file|folder> [-i <more>…] -o ./output [options]
   npm run convert:kits -- -o ./output --no-ktx2
 
-Defaults: lod2 atlas ON (1024), ktx2 ON, LOD 0.5/0.3/0.1, octahedral impostor 4096/12
+Defaults: lod2 atlas ON (1024), ktx2 ON, LOD 0.5/0.3/0.1, LOD3 boxcards 2048
   lod0/lod1: tiling multi-material. lod2: unique UV + 1× atlas (Blender), fallback geometry-only.
+  Legacy octahedral impostor is OFF by default (see legacy/README.md).
 
 Multi-kit:
   -i / --input PATH       Repeatable. File or folder (walks recursively).
@@ -24,22 +25,23 @@ Multi-kit:
 
   --no-lod2-atlas         Skip LOD2 atlas bake (geometry-only like lod1)
   --lod2-atlas-res N      LOD2 atlas edge px (default 1024, hero→2048)
-  --lod3-silhouette       Height-slice silhouette + MASK albedo (DEFAULT on)
-  --no-lod3-silhouette    Skip LOD3 silhouette proxy
-  --lod3-res N            LOD3 albedo edge px (default 2048)
-  --lod3-slices N         LOD3 max adaptive A(z) bands (default 8)
-  --lod3-method M         visual-hull (default) | slices
-  --hero                  Higher impostor (4096/16) + lod2 atlas 2048
+  --lod3-silhouette       6-plane boxcards + MASK atlas (DEFAULT on)
+  --no-lod3-silhouette    Skip LOD3
+  --lod3-res N            LOD3 atlas edge px (default 2048)
+  --lod3-slices N         (legacy ignored)
+  --lod3-method M         (legacy ignored; always boxcards)
+  --hero                  Higher lod2 atlas 2048 (+ legacy impostor 4096/16 if --impostor)
   --ktx2 / --no-ktx2      toktx KTX2 compress
   --ratio 0.5,0.3,0.1     Mesh LOD ratios
+  --impostor              LEGACY octahedral/box impostor (off by default)
   --impostor-mode octahedral|box
   --impostor-res N        Impostor atlas edge px (default 4096)
   --impostor-frames N     Grid size (default 12)
-  --no-impostor
+  --no-impostor           Explicit off (default)
   --max-texture N         Cap basecolor/emissive; normal/ORM capped at 1024
   --pack                  Also write legacy pack.glb (off by default)
-  --shared-textures       Kit _textures/ + external URIs (engine must support!)
-  --no-shared-textures    Embed textures in lod0 (DEFAULT — engine-safe)
+  --shared-textures       Kit _shared/textures/ + external URIs (engine-ready)
+  --no-shared-textures    Embed textures in lod0 (DEFAULT off; bats enable shared)
   --jobs N / -j N         Parallel assets (default 1; kitbash-all uses 7)
   --blender / --toktx     Tool paths
   --keep-work
@@ -67,7 +69,7 @@ function parseArgs(argv) {
     gltfpack: null,
     toktx: null,
     keepWork: false,
-    impostor: true,
+    impostor: false,
     impostorMode: 'octahedral',
     impostorRes: 4096,
     impostorFrames: 12,
@@ -77,7 +79,7 @@ function parseArgs(argv) {
     lod3Silhouette: true,
     lod3Res: 2048,
     lod3Slices: 8,
-    lod3Method: 'visual-hull',
+    lod3Method: 'boxcards',
     hero: false,
     ktx2: true,
     jobs: 1,
@@ -201,6 +203,9 @@ function parseArgs(argv) {
       case '--no-pack':
         args.pack = false;
         break;
+      case '--shared-textures':
+        args.sharedTextures = true;
+        break;
       case '--no-shared-textures':
         args.sharedTextures = false;
         break;
@@ -278,9 +283,9 @@ function printBanner(options, extra = '') {
     }`,
   );
   console.log(
-    `  lod3 silhouette: ${
+    `  lod3 boxcards: ${
       options.lod3Silhouette !== false
-        ? `${options.lod3Res ?? 2048}px, ${options.lod3Method ?? 'visual-hull'}, ≤${options.lod3Slices ?? 8} slices`
+        ? `${options.lod3Res ?? 2048}px atlas (6-plane)`
         : 'no'
     }`,
   );
@@ -288,8 +293,8 @@ function printBanner(options, extra = '') {
   console.log(
     `  impostor: ${
       options.impostor
-        ? `${options.impostorMode} ${options.impostorRes}px / ${options.impostorFrames}×${options.impostorFrames}`
-        : 'no'
+        ? `LEGACY ${options.impostorMode} ${options.impostorRes}px / ${options.impostorFrames}×${options.impostorFrames}`
+        : 'no (legacy opt-in)'
     }`,
   );
   console.log(`  jobs   : ${options.jobs ?? 1}`);

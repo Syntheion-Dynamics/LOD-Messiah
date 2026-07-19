@@ -3,7 +3,7 @@ setlocal EnableExtensions EnableDelayedExpansion
 cd /d "%~dp0"
 
 echo ============================================
-echo  KitBash LOD3 silhouette rebake (v2)
+echo  KitBash LOD3 boxcards rebake
 echo  Source : default.glb  (fallback Kitbash .glb)
 echo  Output : output\^<Kit^>\^<Asset^>\lod3.glb + lod3_atlas\
 echo  Kits   : Manhattan / Every City / Brooklyn
@@ -15,10 +15,8 @@ echo    rebake-lod3-kitbash.bat
 echo    rebake-lod3-kitbash.bat Manhattan
 echo    rebake-lod3-kitbash.bat Brooklyn "Every City"
 echo.
-echo  Paralelne: LOD3_JOBS=2 (default) — 3800X klidne 2-3
-echo    set LOD3_JOBS=3
+echo  Paralelne: LOD3_JOBS=2 (default)
 echo  Vzdy --force (prepise existujici lod3.glb)
-echo  Ctrl+C ukonci.
 echo.
 
 if not exist "node_modules\" call npm install
@@ -29,14 +27,9 @@ if not exist "Kitbash Assets\" (
   exit /b 1
 )
 
-rem Optional overrides:
-rem   set LOD3_RES=2048
-rem   set LOD3_SLICES=8
-rem   set LOD3_JOBS=2
 if not defined LOD3_RES set "LOD3_RES=2048"
-if not defined LOD3_SLICES set "LOD3_SLICES=8"
 if not defined LOD3_JOBS set "LOD3_JOBS=2"
-echo  Settings: RES=%LOD3_RES%  SLICES=%LOD3_SLICES%  JOBS=%LOD3_JOBS%
+echo  Settings: RES=%LOD3_RES%  JOBS=%LOD3_JOBS%
 echo.
 
 if "%~1"=="" (

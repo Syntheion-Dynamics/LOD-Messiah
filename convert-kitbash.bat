@@ -4,8 +4,8 @@ cd /d "%~dp0"
 
 echo ============================================
 echo  KitBash -^> Engine-Ready
-echo  LOD0/1/2 + LOD3 height-slice + impostor
-echo  NO ktx2 / max-texture 2048 / impostor 4096x16
+echo  LOD0/1/2 + LOD3 boxcards (6-plane)
+echo  NO ktx2 / max-texture 2048 / no legacy impostor
 echo ============================================
 echo.
 
@@ -14,25 +14,24 @@ if not exist "node_modules\" call npm install
 set INPUT=%~1
 if "%INPUT%"=="" set INPUT=.\Kitbash Assets\Manhattan\Office_Plaza.glb
 
-rem LOD3 v2 defaults (override before run if needed):
 if not defined LOD3_RES set "LOD3_RES=2048"
-if not defined LOD3_SLICES set "LOD3_SLICES=8"
 
 echo Input: %INPUT%
-echo LOD3 : ON — height-slice + MASK  (%LOD3_RES%px, ≤%LOD3_SLICES% A(z) bands)
+echo LOD3 : ON — 6-plane boxcards + MASK atlas (%LOD3_RES%px)
 echo        vypnout: pridej --no-lod3-silhouette za convert
+echo        legacy impostor: pridej --impostor (viz legacy\README.md)
 echo        batch: convert-kitbash-all.bat  (CONVERT_JOBS=7)
 echo.
 
-if not defined LOD3_METHOD set "LOD3_METHOD=visual-hull"
-call npm run convert -- --input "%INPUT%" --output ./output --no-ktx2 --max-texture 2048 --impostor-res 4096 --impostor-frames 16 --lod3-silhouette --lod3-res %LOD3_RES% --lod3-slices %LOD3_SLICES% --lod3-method %LOD3_METHOD% --jobs 1
+call npm run convert -- --input "%INPUT%" --output ./output --no-ktx2 --max-texture 2048 --no-impostor --lod3-silhouette --lod3-res %LOD3_RES% --shared-textures --jobs 1
 
 echo.
 echo Hotovo. Vystup: output\^<AssetName^>\  (nebo output\^<Kit^>\^<Asset^>\)
-echo   default.glb
-echo   lod0.glb  lod1.glb  lod2.glb
-echo   lod3.glb + lod3_atlas\     ^(height-slice silhouette + MASK^)
-echo   asset.json  (+ impostor.glb pokud OK)
+echo   default.glb  lod0.glb  ^(external URI → _shared\textures\^)
+echo   lod1.glb  lod2.glb
+echo   lod3.glb + lod3_atlas\     ^(6-plane boxcards + MASK, embedded^)
+echo   asset.json  ^(sharedTextures: true^)
+echo   kit: output\^<Kit^>\_shared\textures\
 echo.
 echo Do enginu:
 echo   ship-to-engine.bat Manhattan\Office_Plaza

@@ -9,8 +9,8 @@
   },
   "scripts": {
     "convert": "node src/cli.js",
-    "convert:kits": "node src/cli.js --kits-root \"./Kitbash Assets\" --no-ktx2 --max-texture 2048 --impostor-res 4096 --impostor-frames 16 --lod3-silhouette --lod3-res 2048 --lod3-slices 8 --lod3-method visual-hull --jobs 7",
-    "convert:engine": "node src/cli.js --kits-root \"./Kitbash Assets\" --no-ktx2 --max-texture 2048 --impostor-res 4096 --impostor-frames 16 --lod3-silhouette --lod3-res 2048 --lod3-slices 8 --lod3-method visual-hull --jobs 7",
+    "convert:kits": "node src/cli.js --kits-root \"./Kitbash Assets\" --no-ktx2 --max-texture 2048 --no-impostor --lod3-silhouette --lod3-res 2048 --shared-textures --jobs 7",
+    "convert:engine": "node src/cli.js --kits-root \"./Kitbash Assets\" --no-ktx2 --max-texture 2048 --no-impostor --lod3-silhouette --lod3-res 2048 --shared-textures --jobs 7",
     "rebake:impostors": "node scripts/rebake-kitbash-impostors.js",
     "rebake:lod3": "node scripts/rebake-lod3-kits.js",
     "ship": "node scripts/ship-to-engine.js",

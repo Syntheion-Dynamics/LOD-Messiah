@@ -1,12 +1,12 @@
 #!/usr/bin/env node
 /**
- * Rebake LOD3 height-slice silhouettes from default.glb (parallel Blender jobs).
+ * Rebake LOD3 6-plane boxcards from default.glb (parallel jobs).
  * Walks Kitbash Assets kits; prefers cooked output/<Kit>/<Asset>/default.glb,
  * falls back to the source .glb when default is missing.
  *
  *   npm run rebake:lod3 -- --force
  *   npm run rebake:lod3 -- --force --jobs 2 Manhattan
- *   LOD3_JOBS=2 LOD3_RES=2048 LOD3_SLICES=8 npm run rebake:lod3 -- --force
+ *   LOD3_JOBS=2 LOD3_RES=2048 npm run rebake:lod3 -- --force
  */
 import {
   existsSync,
@@ -29,7 +29,6 @@ const KITS_ROOT = join(ROOT, 'Kitbash Assets');
 const DEFAULT_KITS = ['Manhattan', 'Every City', 'Brooklyn'];
 const MIN_DEFAULT_BYTES = 64 * 1024;
 const RESOLUTION = Number(process.env.LOD3_RES || 2048);
-const SLICES = Number(process.env.LOD3_SLICES || 8);
 
 const argv = process.argv.slice(2);
 const force = argv.includes('--force');
@@ -92,12 +91,35 @@ function listJobs() {
       let sourceGlb = null;
       let sourceLabel = null;
 
-      if (existsSync(cookedDefault) && statSync(cookedDefault).size >= MIN_DEFAULT_BYTES) {
+      // Shared-texture cooks write external URIs in default.glb — Puppeteer cannot
+      // resolve ../_shared/ from a temp work dir. Prefer KitBash source (embedded).
+      const assetJsonPath = join(outDir, 'asset.json');
+      let sharedTextures = false;
+      if (existsSync(assetJsonPath)) {
+        try {
+          const aj = JSON.parse(readFileSync(assetJsonPath, 'utf8'));
+          sharedTextures = aj.sharedTextures === true;
+        } catch {
+          sharedTextures = false;
+        }
+      }
+
+      if (
+        !sharedTextures &&
+        existsSync(cookedDefault) &&
+        statSync(cookedDefault).size >= MIN_DEFAULT_BYTES
+      ) {
         sourceGlb = cookedDefault;
         sourceLabel = 'default';
       } else if (existsSync(sourceKit) && statSync(sourceKit).size >= MIN_DEFAULT_BYTES) {
         sourceGlb = sourceKit;
-        sourceLabel = 'kitbash';
+        sourceLabel = sharedTextures ? 'kitbash (sharedTextures)' : 'kitbash';
+      } else if (
+        existsSync(cookedDefault) &&
+        statSync(cookedDefault).size >= MIN_DEFAULT_BYTES
+      ) {
+        sourceGlb = cookedDefault;
+        sourceLabel = 'default';
       }
 
       if (!sourceGlb) {
@@ -129,17 +151,26 @@ function patchAssetJson(outDir, meta) {
     file: 'lod3.glb',
     atlas: 'lod3_atlas/',
     triangles: meta.triangles,
-    slices: meta.slices,
     resolution: meta.resolution,
-    backend: meta.backend || 'height-slice+blender',
+    backend: meta.backend || 'boxcards',
     source: meta.source || 'default',
     alphaMode: 'MASK',
   };
+  if (!Array.isArray(asset.lods)) asset.lods = [];
+  let entry = asset.lods.find((l) => l.level === 3);
+  if (!entry) {
+    entry = { level: 3, file: 'lod3.glb' };
+    asset.lods.push(entry);
+  }
+  entry.triangles = meta.triangles;
+  entry.atlas = true;
+  entry.maps = 'lod3_atlas/';
+  entry.note = '6-plane boxcards + MASK atlas; self-contained';
+  entry.targetRatio = null;
   writeFileSync(path, JSON.stringify(asset, null, 2));
 }
 
 /**
- * Run async tasks with a fixed concurrency pool.
  * @template T
  * @param {T[]} items
  * @param {number} concurrency
@@ -159,7 +190,7 @@ async function mapPool(items, concurrency, worker) {
 
 const allJobs = listJobs();
 console.log(
-  `KitBash LOD3 rebake — ${allJobs.length} asset(s), ${RESOLUTION}px, slices≤${SLICES}, jobs=${JOBS} (cpu=${cpuCount})`,
+  `KitBash LOD3 boxcards rebake — ${allJobs.length} asset(s), ${RESOLUTION}px, jobs=${JOBS} (cpu=${cpuCount})`,
 );
 console.log(`  kits: ${kits.join(', ')}`);
 console.log(`  prefer: output\\<Kit>\\<Asset>\\default.glb  (fallback: Kitbash .glb)`);
@@ -196,17 +227,14 @@ await mapPool(allJobs, JOBS, async (job) => {
       outDir: job.outDir,
       workDir,
       resolution: RESOLUTION,
-      slices: SLICES,
-      method: process.env.LOD3_METHOD || 'visual-hull',
     });
     patchAssetJson(job.outDir, {
       triangles: result.triangles,
-      slices: result.slices,
       resolution: result.resolution,
       backend: result.backend,
       source: job.sourceLabel,
     });
-    console.log(`OK ${rel} — ${result.triangles} tris`);
+    console.log(`OK ${rel} — ${result.triangles} tris (${result.backend})`);
     ok++;
   } catch (err) {
     console.error(`FAIL ${rel}: ${err.message}`);
