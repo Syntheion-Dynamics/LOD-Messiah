@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 /**
- * Rebake LOD3 6-plane boxcards from default.glb (parallel jobs).
+ * Rebake LOD3 slicecards (silhouette slice stack; boxcards fallback) from default.glb (parallel jobs).
  * Walks Kitbash Assets kits; prefers cooked output/<Kit>/<Asset>/default.glb,
  * falls back to the source .glb when default is missing.
  *
@@ -165,7 +165,10 @@ function patchAssetJson(outDir, meta) {
   entry.triangles = meta.triangles;
   entry.atlas = true;
   entry.maps = 'lod3_atlas/';
-  entry.note = '6-plane boxcards + MASK atlas; self-contained';
+  entry.note =
+    meta.backend === 'slicecards'
+      ? 'silhouette slice stack + box-projected MASK atlas; self-contained'
+      : '6-plane boxcards + MASK atlas; self-contained';
   entry.targetRatio = null;
   writeFileSync(path, JSON.stringify(asset, null, 2));
 }

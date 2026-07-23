@@ -193,8 +193,9 @@ export async function processAsset(assetPath, options) {
       const ratio = ratios[i];
       const label = `LOD${i}`;
       const lodPath = pathJoin(outDir, `lod${i}.glb`);
-      // Ladder ×1/×2/×8 (0.01 / 0.02 / 0.08).
-      const errorMul = i >= 2 ? 8 : Math.pow(2, i);
+      // Ladder ×0.8/×1.5/×8 (0.008 / 0.015 / 0.08) — LOD0 gentler (hero ×0.5),
+      // LOD1 tighter than the old ×2 so facade panels stop collapsing into holes.
+      const errorMul = i >= 2 ? 8 : i === 1 ? 1.5 : options.hero ? 0.5 : 0.8;
       const lodError =
         Array.isArray(options.errors) && options.errors[i] != null
           ? options.errors[i]
@@ -202,7 +203,9 @@ export async function processAsset(assetPath, options) {
       const protectUv = i < 2;
       // Keep glass/emissive facade panes on every LOD (thin windows vanish under meshopt).
       const protectGlass = true;
-      const pruneError = i >= 2 ? 0.02 : 0.01;
+      // Prune deletes small disconnected components; 0.01 of a ~100 m building
+      // is metre-scale facade pieces → visible holes on LOD0/1. Keep it tiny there.
+      const pruneError = i >= 2 ? 0.02 : 0.005;
 
       console.log(
         `  ${label}: permissive simplify ratio=${ratio} error=${lodError} prune=${pruneError}${protectUv ? '' : ' (uv seams free)'}${protectGlass ? ' +glass protect' : ''}`,
@@ -361,7 +364,8 @@ export async function processAsset(assetPath, options) {
       if (lod2AtlasOk) atlasUsed = true;
     }
 
-    // 5) LOD3 boxcards — 6 AABB quads + ortho atlas (MASK)
+    // 5) LOD3 slicecards — silhouette slice stack + box-projected ortho atlas
+    //    (MASK; falls back to 6-quad AABB boxcards when extraction fails)
     let lod3Info = null;
     if (options.lod3Silhouette !== false) {
       const lod3Source = existsSync(impostorSourceGlb)
@@ -391,7 +395,7 @@ export async function processAsset(assetPath, options) {
             stats,
             health: {
               ok: true,
-              msg: `boxcards — ${lod3Info.triangles} tris`,
+              msg: `${lod3Info.backend || 'boxcards'} — ${lod3Info.triangles} tris`,
             },
             baked: true,
             atlas: true,
@@ -551,7 +555,7 @@ export async function processAsset(assetPath, options) {
         atlasUsed,
         lod3Silhouette: options.lod3Silhouette !== false,
         lod3Res: options.lod3Res ?? 2048,
-        lod3Method: 'boxcards',
+        lod3Method: lod3Info?.backend || 'boxcards',
         hero: !!options.hero,
         ktx2: options.ktx2 !== false,
         impostor: options.impostor,
@@ -948,6 +952,7 @@ function writeAssetJson(outDir, stem, lodResults, impostorInfo, extra = {}) {
         triangles: lod3Info.triangles ?? null,
         resolution: lod3Info.resolution ?? null,
         backend: lod3Info.backend || 'boxcards',
+        slices: lod3Info.slices ?? 0,
         alphaMode: lod3Info.alphaMode || 'MASK',
       };
     }
@@ -967,7 +972,9 @@ function writeAssetJson(outDir, stem, lodResults, impostorInfo, extra = {}) {
             maps: l.maps || (l.level === 3 ? 'lod3_atlas/' : 'lod2_atlas/'),
             note:
               l.level === 3
-                ? '6-plane boxcards + MASK atlas; self-contained'
+                ? lod3 && lod3.backend === 'slicecards'
+                  ? 'silhouette slice stack + box-projected MASK atlas; self-contained'
+                  : '6-plane boxcards + MASK atlas; self-contained'
                 : 'self-contained PBR atlas (unique UV)',
           }
         : l.level >= 1

@@ -4,15 +4,13 @@ cd /d "%~dp0"
 
 echo ============================================
 echo  Ship ALL KitBash kits -^> Bungac Assets
-echo  Manhattan + Brooklyn + Every City
+echo  Dynamicky z "Kitbash Assets" ^(vsechny slozky^)
 echo  default.glb + lod0/1/2/3 + atlasy + _shared/
 echo ============================================
 echo.
 echo  Scena: Buildings\^<Kit^>\^<Asset^>\lod0.glb
-echo  default.glb vedle = close-up (engine LOD0)
-echo  _shared\textures\ = sdilene textury (jednou za kit)
-echo.
 echo  Opt: --dry-run   --no-default   --no-pause
+echo  Alias: ship-to-engine.bat  ^(bez argumentu = totez^)
 echo ============================================
 echo.
 
@@ -26,26 +24,13 @@ if /I "%~1"=="--no-default" set EXTRA=%EXTRA% --no-default
 if /I "%~2"=="--no-default" set EXTRA=%EXTRA% --no-default
 if /I "%~3"=="--no-default" set EXTRA=%EXTRA% --no-default
 
-set FAILED=0
-
+echo Spoustim: node scripts\ship-kit-to-engine.js --all%EXTRA%
 echo.
-echo --- Manhattan ---
-node scripts\ship-kit-to-engine.js Manhattan%EXTRA%
-if errorlevel 1 set FAILED=1
 
-echo.
-echo --- Brooklyn ---
-node scripts\ship-kit-to-engine.js Brooklyn%EXTRA%
-if errorlevel 1 set FAILED=1
-
-echo.
-echo --- Every City ---
-node scripts\ship-kit-to-engine.js "Every City"%EXTRA%
-if errorlevel 1 set FAILED=1
-
-echo.
-if "%FAILED%"=="1" (
-  echo Ship ALL FAILED ^(alespon jeden kit^).
+node scripts\ship-kit-to-engine.js --all%EXTRA%
+if errorlevel 1 (
+  echo.
+  echo Ship ALL FAILED.
   if /I "%~1"=="--no-pause" goto :eof
   if /I "%~2"=="--no-pause" goto :eof
   if /I "%~3"=="--no-pause" goto :eof
@@ -53,10 +38,9 @@ if "%FAILED%"=="1" (
   exit /b 1
 )
 
+echo.
 echo ============================================
-echo Hotovo. Vsechny kity v Assets\Buildings\
-echo   Manhattan\  Brooklyn\  Every City\
-echo   + _shared\textures\ u kazdeho kitu
+echo Hotovo. Vsechny uvarene kity v Assets\Buildings\
 echo ============================================
 if /I "%~1"=="--no-pause" goto :eof
 if /I "%~2"=="--no-pause" goto :eof

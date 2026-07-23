@@ -1,6 +1,6 @@
 # Stav LOD Messiah → Bungáč (pro architekta)
 
-> Datum: 2026-07-19 (večer — LOD3 **boxcards** nasazeno)  
+> Datum: 2026-07-20 (LOD3 **slicecards** nasazeno — silueta z výškových pásů + promítnuté fotky; boxcards zůstal jako fallback)  
 > Ty nejsi programátor — tohle je mapa „co máme / kde klikat / co ještě bolí“.  
 > **Důležité zjištění z Blenderu:** LOD2 vypadá bíle (bez textur) = OK u geo-only. Okna na LOD0/1/2 = glass-safe simplify (§4.2).
 
@@ -9,7 +9,7 @@
 ## 1. Jednou větou
 
 Kitbash se **peče offline** v TOOL. Hra jen načte hotové soubory.  
-**LOD3 = 6 placek na AABB** (fotka každé strany, MASK) — varianta A.  
+**LOD3 = slicecards**: silueta budovy z výškových pásů (křídla / věž / nástavba každé svou výšku a půdorys) a na ni **promítnuté ortho fotky** podle směru stěny (stejný 3×2 MASK atlas jako boxcards). Když extrakce selže, spadne to na starý AABB box. Typicky 30–350 tris.  
 Vzorky: **Office_Plaza** + **Brooklyn_Luxury_Flats** (připečené). QC: Blender orbit → Force LOD 3 ve hře.
 
 ---
@@ -40,9 +40,9 @@ output\Manhattan\Office_Plaza\
   lod0.glb        ← runtime blízko (mesh + textury)
   lod1.glb        ← střední vzdálenost (jen geometrie)
   lod2.glb        ← dál (jen geometrie u našeho cooku)
-  lod3.glb        ← 6 AABB placek + MASK atlas (boxcards, ~12 tris)
+  lod3.glb        ← silueta z výškových pásů + promítnutý atlas (slicecards, ~30–350 tris)
   lod3_atlas\     ← albedo (RGBA, A = coverage)
-  asset.json      ← seznam LODů + blok "lod3": { backend: "boxcards" }
+  asset.json      ← seznam LODů + blok "lod3": { backend: "slicecards", slices: N }
   report.json     ← QA čísla
 ```
 
@@ -65,7 +65,7 @@ File → Import → glTF → vyber `lod0.glb` / `lod1.glb` / `lod2.glb` / `lod3.
 | Ship script do Assets | ✅ | day-1 bez default/impostor |
 | Engine: načte lod0 + sourozence | ✅ | Force LOD 0/1/2/3 v DEBUG |
 | Engine: lod1 bere textury z lod0 | ✅ | podle jména materiálů |
-| LOD3 boxcards (6 placek + MASK) | ✅ | Varianta A; Office_Plaza + Brooklyn_Luxury_Flats připečeno |
+| LOD3 slicecards (silueta pásů + MASK) | ✅ | 20.07 — nahradilo boxcards jako default; boxcards = fallback. Engine kontrakt beze změny |
 | Engine MASK cutout pro LOD3 | ✅ | bez mipů + clamp UV na self-contained |
 | Octahedral impostor bake | ⏸ legacy | v `legacy\`; default cook **vypnutý** (čeká Vulkan shader) |
 | Celý Kitbash uvařený | ❌ | jen vzorky (Office_Plaza, Energy_Office, …) |

@@ -13,8 +13,9 @@ LOD Messiah — High-Poly → Engine-Ready (KitBash pipeline)
   npm run convert -- -i <file|folder> [-i <more>…] -o ./output [options]
   npm run convert:kits -- -o ./output --no-ktx2
 
-Defaults: lod2 atlas ON (1024), ktx2 ON, LOD 0.5/0.3/0.1, LOD3 boxcards 2048
+Defaults: lod2 atlas ON (1024), ktx2 ON, LOD 0.5/0.3/0.1, LOD3 slicecards 2048
   lod0/lod1: tiling multi-material. lod2: unique UV + 1× atlas (Blender), fallback geometry-only.
+  lod3: silhouette slice stack + box-projected ortho atlas (boxcards fallback).
   Legacy octahedral impostor is OFF by default (see legacy/README.md).
 
 Multi-kit:
@@ -25,7 +26,7 @@ Multi-kit:
 
   --no-lod2-atlas         Skip LOD2 atlas bake (geometry-only like lod1)
   --lod2-atlas-res N      LOD2 atlas edge px (default 1024, hero→2048)
-  --lod3-silhouette       6-plane boxcards + MASK atlas (DEFAULT on)
+  --lod3-silhouette       LOD3 slice stack + MASK atlas (DEFAULT on)
   --no-lod3-silhouette    Skip LOD3
   --lod3-res N            LOD3 atlas edge px (default 2048)
   --lod3-slices N         (legacy ignored)
@@ -283,9 +284,9 @@ function printBanner(options, extra = '') {
     }`,
   );
   console.log(
-    `  lod3 boxcards: ${
+    `  lod3 slicecards: ${
       options.lod3Silhouette !== false
-        ? `${options.lod3Res ?? 2048}px atlas (6-plane)`
+        ? `${options.lod3Res ?? 2048}px atlas (slice stack, boxcards fallback)`
         : 'no'
     }`,
   );
