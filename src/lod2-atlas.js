@@ -19,6 +19,10 @@ import { spawnAsync } from './spawn-async.js';
  * @param {string} options.outputGlb final lod2.glb path
  * @param {number} [options.resolution]
  * @param {string|null} [options.blender]
+ * @param {number[]} [options.glassTint] LINEAR r,g,b sky proxy for unusable glass base colours
+ * @param {number} [options.glassMetallic] far-LOD glass metallic (low: no IBL → metal reads black)
+ * @param {number} [options.glassRoughness]
+ * @param {boolean} [options.glassProxy] default true; false bakes glass untouched (debug)
  */
 export async function bakeLod2Atlas(options) {
   const {
@@ -29,6 +33,10 @@ export async function bakeLod2Atlas(options) {
     outputGlb,
     resolution = 1024,
     blender = null,
+    glassTint = null,
+    glassMetallic = null,
+    glassRoughness = null,
+    glassProxy = true,
   } = options;
 
   const bin = resolveBlender(blender);
@@ -63,22 +71,34 @@ export async function bakeLod2Atlas(options) {
 
   const script = join(ROOT, 'scripts', 'blender_lod2_atlas_bake.py');
   console.log(`  LOD2: Blender atlas bake ${resolution}px`);
+
+  const bakeArgs = [
+    '--input',
+    prepGlb,
+    '--output',
+    bakedGlb,
+    '--faces-dir',
+    mapsDir,
+    '--resolution',
+    String(resolution),
+  ];
+  if (!glassProxy) {
+    bakeArgs.push('--no-glass-proxy');
+  } else {
+    if (Array.isArray(glassTint) && glassTint.length >= 3) {
+      bakeArgs.push('--glass-tint', glassTint.slice(0, 3).join(','));
+    }
+    if (glassMetallic != null) {
+      bakeArgs.push('--glass-metallic', String(glassMetallic));
+    }
+    if (glassRoughness != null) {
+      bakeArgs.push('--glass-roughness', String(glassRoughness));
+    }
+  }
+
   const r = await spawnAsync(
     bin,
-    [
-      '--background',
-      '--python',
-      script,
-      '--',
-      '--input',
-      prepGlb,
-      '--output',
-      bakedGlb,
-      '--faces-dir',
-      mapsDir,
-      '--resolution',
-      String(resolution),
-    ],
+    ['--background', '--python', script, '--', ...bakeArgs],
     { maxBuffer: 256 * 1024 * 1024 },
   );
 
@@ -102,15 +122,24 @@ export async function bakeLod2Atlas(options) {
   }
   await io.write(outputGlb, bakedDoc);
   console.log(
-    `  LOD2: atlas OK (luma ${qc.meanLuminance?.toFixed(3)}, uvArea ${qc.uvFaceAreaSum?.toFixed(3)})`,
+    `  LOD2: atlas OK (luma ${qc.meanLuminanceOpaque?.toFixed(3)} opaque / ` +
+      `${qc.meanLuminance?.toFixed(3)} all, ` +
+      `nearBlack ${((qc.nearBlackRatio ?? 0) * 100).toFixed(1)}%, ` +
+      `uvArea ${qc.uvFaceAreaSum?.toFixed(3)})`,
   );
+  for (const w of qc.warnings ?? []) {
+    console.warn(`  LOD2: ⚠ ${w}`);
+  }
 
   return {
     outputGlb,
     mapsDir,
     resolution,
     meanLuminance: qc.meanLuminance,
+    meanLuminanceOpaque: qc.meanLuminanceOpaque,
+    nearBlackRatio: qc.nearBlackRatio,
     uvFaceAreaSum: qc.uvFaceAreaSum,
+    warnings: qc.warnings ?? [],
     backend: 'watlas+blender',
   };
 }

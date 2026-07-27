@@ -136,7 +136,16 @@ Když v Blenderu chceš vidět LOD2 s texturami, musíš buď:
 
 **Office_Plaza (přecook 19.07):** `glassQc` 91 780 → 91 780 na LOD0/1/2 (100 %). LOD2 ~126k tris (ne ~42k). Cook: `--no-lod2-atlas` (geo-only; textury ve hře z LOD0).
 
-→ **Akce:** v Blenderu porovnej `default` vs `lod0/1/2` — skleněné plošky musí zůstat (ne průhledný skelet). Ve hře Force LOD 0→2.
+→ **Akce:** v Blenderu porovnej `default` vs `lod0/1/2` — skleněné plošky musí zůstat (ne průhledný skelet). Ve hře Force LOD (engine numbering: Force N ≈ soubor `lod(N-1)`).
+
+### 4.3 LOD2 atlas — černé sklo (opraveno 27.07)
+
+**Příčina:** Cycles EMIT bake čte Base Color; KitBash transmission sklo má často černý base → černé panely; pak `OPAQUE` force.
+
+**Oprava:** Před bake v `blender_lod2_atlas_bake.py` → opaque glass proxy  
+`Base Color = lerp(baseColor, skyTint, transmission)`. QC: `nearBlackRatio` na albedo (>18 % = fail).
+
+**LOD3 proxy-chain:** ortho bake bere **`lod2.glb`** (když atlas OK), ne embedded — barva skla se dědí pixely. Smazán `×1.45` gain a hardcoded `#b4d0e8` glass v `prepareMaterials`. Report: `albedoPop` (Δ luma lod2 vs lod3).
 
 ---
 

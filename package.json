@@ -15,7 +15,8 @@
     "rebake:lod3": "node scripts/rebake-lod3-kits.js",
     "ship": "node scripts/ship-to-engine.js",
     "smoke": "node src/cli.js --input ./input --output ./output --max-texture 2048 --ratio 0.5 --no-impostor --no-ktx2",
-    "gallery": "node src/gallery-server.js"
+    "gallery": "node src/gallery-server.js",
+    "cook-ui": "node src/cook-ui-server.js"
   },
   "engines": {
     "node": ">=20"

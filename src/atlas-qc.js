@@ -6,28 +6,64 @@ import { ALL_EXTENSIONS } from '@gltf-transform/extensions';
 
 const MIN_MEAN_LUMINANCE = 0.02;
 const MIN_UV_FACE_AREA = 1e-4;
+/** Opaque pixels darker than this count as near-black (failed glass bake). */
+const NEAR_BLACK_LUMA = 0.04;
+/**
+ * Warn — never fail — above this share of near-black opaque pixels.
+ *
+ * Rejecting the bake makes things strictly worse: the caller falls back to
+ * stripTextures(), so a partly-dark atlas is traded for a LOD2 with no texture
+ * at all, which in turn drops LOD3 off the proxy chain. Dark buildings are also
+ * a legitimate art choice. Surface it, keep the atlas.
+ */
+const WARN_NEAR_BLACK_RATIO = 0.18;
+
+/**
+ * @typedef {object} AtlasQcResult
+ * @property {boolean} ok
+ * @property {string} [reason]        set only when ok === false
+ * @property {string[]} warnings      non-fatal findings, safe to ship
+ * @property {number} [meanLuminance] mean over every pixel (legacy gate)
+ * @property {number} [meanLuminanceOpaque] mean over opaque pixels only
+ * @property {number} [nearBlackRatio]
+ * @property {number} [uvFaceAreaSum]
+ */
 
 /**
  * Reject nearly-black / degenerate-UV atlas bakes so the pipeline can fall back.
  * @param {string} atlasGlb
  * @param {string} mapsDir
- * @returns {Promise<{ ok: boolean, reason?: string, meanLuminance?: number, uvFaceAreaSum?: number }>}
+ * @returns {Promise<AtlasQcResult>}
  */
 export async function validateAtlasBake(atlasGlb, mapsDir) {
   const albedoPath = join(mapsDir, 'albedo.png');
   if (!existsSync(atlasGlb)) {
-    return { ok: false, reason: 'atlas GLB missing' };
+    return { ok: false, reason: 'atlas GLB missing', warnings: [] };
   }
   if (!existsSync(albedoPath)) {
-    return { ok: false, reason: 'albedo.png missing' };
+    return { ok: false, reason: 'albedo.png missing', warnings: [] };
   }
 
-  const meanLuminance = await meanLuminancePng(albedoPath);
+  const stats = await albedoStatsPng(albedoPath);
+  const { meanLuminance, meanLuminanceOpaque, nearBlackRatio } = stats;
+  /** @type {string[]} */
+  const warnings = [];
+
+  if (nearBlackRatio > WARN_NEAR_BLACK_RATIO) {
+    warnings.push(
+      `albedo near-black ${(nearBlackRatio * 100).toFixed(1)}% of opaque px ` +
+        `(> ${(WARN_NEAR_BLACK_RATIO * 100).toFixed(0)}%) — check glass proxy`,
+    );
+  }
+
   if (meanLuminance < MIN_MEAN_LUMINANCE) {
     return {
       ok: false,
       reason: `albedo nearly black (mean luminance ${meanLuminance.toFixed(4)} < ${MIN_MEAN_LUMINANCE})`,
+      warnings,
       meanLuminance,
+      meanLuminanceOpaque,
+      nearBlackRatio,
     };
   }
 
@@ -36,15 +72,37 @@ export async function validateAtlasBake(atlasGlb, mapsDir) {
     return {
       ok: false,
       reason: `degenerate atlas UVs (sum face area ${uvFaceAreaSum.toExponential(2)} < ${MIN_UV_FACE_AREA})`,
+      warnings,
       meanLuminance,
+      meanLuminanceOpaque,
+      nearBlackRatio,
       uvFaceAreaSum,
     };
   }
 
-  return { ok: true, meanLuminance, uvFaceAreaSum };
+  return {
+    ok: true,
+    warnings,
+    meanLuminance,
+    meanLuminanceOpaque,
+    nearBlackRatio,
+    uvFaceAreaSum,
+  };
 }
 
-async function meanLuminancePng(path) {
+/**
+ * Mean Rec.709 luminance + fraction of opaque pixels below NEAR_BLACK_LUMA.
+ *
+ * `meanLuminance` spans every pixel and is kept only for the legacy
+ * MIN_MEAN_LUMINANCE gate. Use `meanLuminanceOpaque` to compare two atlases:
+ * empty atlas space differs wildly between layouts (a watlas LOD2 pack vs the
+ * LOD3 3×2 grid, which leaves ~33% of a square atlas unused), so an all-pixel
+ * mean measures packing efficiency far more than it measures appearance.
+ *
+ * @param {string} path
+ * @returns {Promise<{ meanLuminance: number, meanLuminanceOpaque: number, nearBlackRatio: number, opaqueRatio: number }>}
+ */
+export async function albedoStatsPng(path) {
   const { data, info } = await sharp(path)
     .ensureAlpha()
     .raw()
@@ -52,15 +110,33 @@ async function meanLuminancePng(path) {
   const channels = info.channels;
   let sum = 0;
   let n = 0;
+  let sumOpaque = 0;
+  let opaque = 0;
+  let nearBlack = 0;
   for (let i = 0; i < data.length; i += channels) {
+    const a = channels > 3 ? data[i + 3] / 255 : 1;
     const r = data[i] / 255;
     const g = data[i + 1] / 255;
     const b = data[i + 2] / 255;
-    // Rec. 709 luminance
-    sum += 0.2126 * r + 0.7152 * g + 0.0722 * b;
+    const luma = 0.2126 * r + 0.7152 * g + 0.0722 * b;
+    sum += luma;
     n += 1;
+    if (a < 0.1) continue;
+    opaque += 1;
+    sumOpaque += luma;
+    if (luma < NEAR_BLACK_LUMA) nearBlack += 1;
   }
-  return n ? sum / n : 0;
+  return {
+    meanLuminance: n ? sum / n : 0,
+    meanLuminanceOpaque: opaque ? sumOpaque / opaque : 0,
+    nearBlackRatio: opaque ? nearBlack / opaque : 0,
+    opaqueRatio: n ? opaque / n : 0,
+  };
+}
+
+async function meanLuminancePng(path) {
+  const { meanLuminance } = await albedoStatsPng(path);
+  return meanLuminance;
 }
 
 async function sumUvFaceArea(glbPath) {

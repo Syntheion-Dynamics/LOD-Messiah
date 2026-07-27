@@ -86,7 +86,14 @@ Minimální soubory pro LOD ve hře:
 2. Engine najde sibling `lod1.glb`, `lod2.glb`, `lod3.glb` ve stejné složce (nebo přečte `asset.json` → `lods[].file`).
 3. `LodSelector` přepíná podle vzdálenosti / screen size + **hystereze** (~±10 %).
 4. Textury z lod0: **PNG → BC7** v texcache. TOOL vařit s **`--no-ktx2`**.
-5. LOD3 = self-contained MASK (viz §4.5) — Force LOD 3 v DEBUG.
+5. LOD3 = self-contained MASK (viz §4.5) — v DEBUG **Force LOD**: engine numbering je posunuté — Force **N** ≈ soubor `lod(N-1)` (Force 3 = `lod2.glb`, Force 4 = `lod3.glb`).
+
+### 4.4 LOD thresholds / pop (engine handoff)
+
+- Prahy `T LOD1` … musí být **rozestoupené** (ne `T LOD1 == T LOD2`) — jinak Auto přeskočí úroveň.
+- Hystereze ~10–12 % proti flickeru; na vizuální pop lod2↔lod3 nestačí — TOOL peče LOD3 z `lod2.glb` (stejné albedo pixely).
+- Ideálně **alpha stipple / dither crossfade** při přechodu (GTA-style); fog pomáhá schovat zbylý skok.
+- LOD3 může být o ~2 % „tlustší“ (MARGIN / dilate) — reziduum, ne bug loaderu.
 
 ### 4.5 LOD3 v2 — MASK cutout (povinné chování enginu)
 

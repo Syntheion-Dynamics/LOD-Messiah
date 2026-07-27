@@ -20,7 +20,40 @@ def parse_args(argv):
     p.add_argument("--output", required=True)
     p.add_argument("--faces-dir", required=True)
     p.add_argument("--resolution", type=int, default=1024)
+    p.add_argument(
+        "--glass-tint",
+        default=None,
+        help="LINEAR r,g,b sky proxy for glass with no usable base colour "
+        "(default %s)" % (",".join(f"{c:.3f}" for c in SKY_TINT[:3]),),
+    )
+    p.add_argument("--glass-metallic", type=float, default=None)
+    p.add_argument("--glass-roughness", type=float, default=None)
+    p.add_argument(
+        "--no-glass-proxy",
+        action="store_true",
+        help="bake glass materials untouched (debug: shows the raw failure)",
+    )
     return p.parse_args(argv)
+
+
+def parse_tint(text):
+    """'0.254,0.441,0.541' → RGBA tuple; None on anything unparseable."""
+    if not text:
+        return None
+    try:
+        parts = [float(v) for v in str(text).replace(";", ",").split(",")]
+    except ValueError:
+        print(f"WARN: --glass-tint '{text}' not parseable — using default")
+        return None
+    if len(parts) < 3:
+        print(f"WARN: --glass-tint '{text}' needs r,g,b — using default")
+        return None
+    return (
+        max(0.0, min(1.0, parts[0])),
+        max(0.0, min(1.0, parts[1])),
+        max(0.0, min(1.0, parts[2])),
+        1.0,
+    )
 
 
 def clear_scene(bpy):
@@ -85,6 +118,171 @@ def pin_textures_to_uv(bpy, obj, uv_name):
             uv_node.uv_map = uv_name
             uv_node.location = (n.location.x - 250, n.location.y)
             links.new(uv_node.outputs["UV"], n.inputs["Vector"])
+
+
+# Distant-window sky proxy, sRGB #8AA7B8 expressed in LINEAR — Blender colour
+# sockets are scene-linear and the EMIT bake encodes linear→sRGB on save, so
+# writing the sRGB bytes here would come out ~#C2D3DD (washed out).
+SKY_TINT = (0.254, 0.386, 0.479, 1.0)
+
+# A base colour this dark carries no usable appearance (KitBash GlassClear is
+# 0.03/0.04/0.04) — only then does the sky proxy replace it.
+GLASS_BASE_DARK_LUMA = 0.05
+
+# Far-LOD glass defaults. metallic stays low on purpose: KitBash glass ships at
+# metallic=1, and a fully metallic surface with no IBL/env probe renders BLACK —
+# that, not a dark albedo, is what makes most LOD2 windows go black. LOD3 is
+# hardcoded metallic 0, so keeping this near 0 also avoids a specular pop.
+GLASS_METALLIC = 0.0
+GLASS_ROUGHNESS = 0.25
+
+
+def _transmission_input(bsdf):
+    """Blender 4+ renamed Transmission → Transmission Weight."""
+    return bsdf.inputs.get("Transmission Weight") or bsdf.inputs.get("Transmission")
+
+
+def _input_default4(sock, fallback=(1.0, 1.0, 1.0, 1.0)):
+    if sock is None:
+        return fallback
+    try:
+        v = sock.default_value
+        if len(v) >= 3:
+            return (float(v[0]), float(v[1]), float(v[2]), float(v[3]) if len(v) > 3 else 1.0)
+    except Exception:
+        pass
+    return fallback
+
+
+def _is_glass_material(mat, bsdf):
+    name = (mat.name or "").lower()
+    if any(k in name for k in ("glass", "window", "curtainwall")):
+        return True
+    tr = _transmission_input(bsdf)
+    if tr is not None:
+        try:
+            if float(tr.default_value) > 0.05:
+                return True
+        except Exception:
+            pass
+    return False
+
+
+def _force_value(links, sock, value):
+    """Sever any incoming link and pin a constant.
+
+    Glass metallic/roughness is often driven by a packed ORM texture, so a
+    link-preserving write would leave metallic=1 in place and keep the windows
+    black — the very thing this pass exists to fix.
+    """
+    if sock is None:
+        return
+    try:
+        for link in list(sock.links):
+            links.remove(link)
+        sock.default_value = value
+    except Exception:
+        pass
+
+
+def replace_glass_with_opaque_proxy(bpy, obj, tint=None, metallic=None, roughness=None):
+    """Turn transmissive/window materials into an opaque far-LOD proxy.
+
+    Two distinct failure modes produce "black windows" at LOD2, and they need
+    different treatment:
+
+      1. metallic=1 (EVERY KitBash glass material) — a fully metallic surface
+         with no IBL has no diffuse term and renders black in-engine. Fixed by
+         clamping metallic on every glass slot. This is the common case.
+      2. a genuinely near-black base colour with transmission carrying the look
+         (KB3D_EVC_GlassClear = 0.03/0.04/0.04, transmission 1). Only here is
+         there no appearance to keep, so the sky tint substitutes for it.
+
+    The base colour is therefore left ALONE whenever it is usable — a linked
+    texture (KB3D_MIM_GlassBlue/Cyan/Black, KB3D_EVC_WindowLouversA, …) or a
+    factor above GLASS_BASE_DARK_LUMA. Overwriting those would flatten authored
+    window art into one uniform panel and erase the per-material tint KitBash
+    ships, which is exactly what the shared-tint contract is meant to preserve.
+    """
+    sky = tuple(tint) if tint else SKY_TINT
+    metal_v = GLASS_METALLIC if metallic is None else float(metallic)
+    rough_v = GLASS_ROUGHNESS if roughness is None else float(roughness)
+
+    n_glass = 0
+    n_tinted = 0
+    for slot in obj.material_slots:
+        mat = slot.material
+        if mat is None:
+            continue
+        try:
+            mat.use_nodes = True
+        except Exception:
+            pass
+        nodes = mat.node_tree.nodes
+        links = mat.node_tree.links
+        bsdf = next((n for n in nodes if n.type == "BSDF_PRINCIPLED"), None)
+        if bsdf is None or not _is_glass_material(mat, bsdf):
+            continue
+
+        base = bsdf.inputs.get("Base Color")
+        if base is None:
+            continue
+        tr = _transmission_input(bsdf)
+        n_glass += 1
+
+        # --- appearance: keep whatever the material already carries ----------
+        base_rgba = _input_default4(base, (0.0, 0.0, 0.0, 1.0))
+        base_luma = (
+            0.2126 * base_rgba[0] + 0.7152 * base_rgba[1] + 0.0722 * base_rgba[2]
+        )
+        keep_base = base.is_linked or base_luma > GLASS_BASE_DARK_LUMA
+
+        if keep_base:
+            detail = "texture" if base.is_linked else f"luma {base_luma:.3f}"
+            print(f"  glass-proxy: {mat.name} keeps base colour ({detail})")
+        else:
+            # Nothing usable to preserve — substitute the distant sky proxy.
+            for link in list(base.links):
+                links.remove(link)
+            base.default_value = sky
+            n_tinted += 1
+            print(
+                f"  glass-proxy: {mat.name} base luma {base_luma:.3f} → sky tint "
+                f"rgb({sky[0]:.3f},{sky[1]:.3f},{sky[2]:.3f})"
+            )
+
+        # --- always: make it an opaque, non-metallic far-LOD surface ---------
+        if tr is not None:
+            try:
+                for link in list(tr.links):
+                    links.remove(link)
+                tr.default_value = 0.0
+            except Exception:
+                pass
+        alpha = bsdf.inputs.get("Alpha")
+        if alpha is not None:
+            for link in list(alpha.links):
+                links.remove(link)
+            try:
+                alpha.default_value = 1.0
+            except Exception:
+                pass
+
+        _force_value(links, bsdf.inputs.get("Metallic"), metal_v)
+        _force_value(links, bsdf.inputs.get("Roughness"), rough_v)
+
+        try:
+            mat.blend_method = "OPAQUE"
+        except Exception:
+            pass
+
+    if n_glass:
+        print(
+            f"  glass-proxy: {n_glass} glass material(s) → opaque "
+            f"metallic={metal_v:.2f} roughness={rough_v:.2f}"
+            f" ({n_tinted} sky-tinted, {n_glass - n_tinted} kept own colour)"
+        )
+    return n_glass
 
 
 def ensure_basecolor_for_bake(bpy, obj):
@@ -375,6 +573,16 @@ def main():
     bpy.ops.import_scene.gltf(filepath=args.input)
     obj = join_all_meshes(bpy)
     prepare_atlas_uv(bpy, obj)
+    if args.no_glass_proxy:
+        print("  glass-proxy: disabled (--no-glass-proxy)")
+    else:
+        replace_glass_with_opaque_proxy(
+            bpy,
+            obj,
+            tint=parse_tint(args.glass_tint),
+            metallic=args.glass_metallic,
+            roughness=args.glass_roughness,
+        )
     ensure_basecolor_for_bake(bpy, obj)
     ensure_cycles(bpy)
 

@@ -33,6 +33,7 @@ import { countGlassTris } from './glass-materials.js';
 import { generateImpostor } from './impostor.js';
 import { bakeLod2Atlas } from './lod2-atlas.js';
 import { bakeLod3Silhouette } from './lod3-silhouette.js';
+import { albedoStatsPng } from './atlas-qc.js';
 import {
   collectStats,
   fileSizeBytes,
@@ -40,6 +41,96 @@ import {
   reductionReport,
   assessHealth,
 } from './stats.js';
+
+/** Split a GLB into its JSON chunk (parsed) and BIN chunk (raw). */
+function readGlbChunks(glbPath) {
+  const buf = readFileSync(glbPath);
+  if (buf.length < 20 || buf.readUInt32LE(0) !== 0x46546c67) {
+    throw new Error('not a GLB');
+  }
+  let json = null;
+  let bin = Buffer.alloc(0);
+  let offset = 12;
+  while (offset + 8 <= buf.length) {
+    const chunkLen = buf.readUInt32LE(offset);
+    const chunkType = buf.readUInt32LE(offset + 4);
+    const start = offset + 8;
+    const end = start + chunkLen;
+    if (end > buf.length) break;
+    if (chunkType === 0x4e4f534a) {
+      json = JSON.parse(buf.subarray(start, end).toString('utf8'));
+    } else if (chunkType === 0x004e4942) {
+      bin = buf.subarray(start, end);
+    }
+    offset = end + ((4 - (chunkLen % 4)) % 4);
+  }
+  if (!json) throw new Error('GLB has no JSON chunk');
+  return { json, bin };
+}
+
+/**
+ * Write kit/asset/LOD identity into a GLB's glTF asset.extras and rename the
+ * root scene node so engines show a readable name in the hierarchy.
+ *
+ * Result node name: "KitName__AssetName__LOD0"
+ * extras.hpAsset: { kit, asset, lod, lodFile }
+ *
+ * This patches the GLB's JSON chunk in place rather than round-tripping the
+ * document through gltf-transform. That is deliberate: the GLB writer re-embeds
+ * external images (the whole reason writeGlbPreservingExternalImages exists), so
+ * a read/write here would silently inline every shared texture back into lod0.glb
+ * and defeat the _shared/textures/ dedup. A JSON-chunk patch cannot touch
+ * buffers, images or URIs.
+ *
+ * @param {string} glbPath  — path to an already-written GLB to patch in-place
+ * @param {string} stem     — e.g. "Manhattan/TowerA" or "Brooklyn/Block04"
+ * @param {number} lodLevel — 0-3
+ * @param {object} [opts]
+ * @param {string} [opts.lodFileName] — defaults to lod<N>.glb
+ * @param {string} [opts.suffix] — name suffix, defaults to LOD<N>
+ * @param {boolean} [opts.renameNodes] — default FALSE, see below
+ */
+function stampLodMetadata(glbPath, stem, lodLevel, opts = {}) {
+  const { lodFileName = null, suffix = null, renameNodes = false } = opts;
+  try {
+    const parts = stem.replace(/\\/g, '/').split('/').filter(Boolean);
+    const kit = parts.length >= 2 ? parts[parts.length - 2] : 'Unknown';
+    const asset = parts[parts.length - 1] ?? stem;
+    const lodFile = lodFileName || `lod${lodLevel}.glb`;
+
+    const { json, bin } = readGlbChunks(glbPath);
+
+    json.asset = json.asset || {};
+    json.asset.extras = {
+      ...(json.asset.extras || {}),
+      hpAsset: { kit, asset, lod: lodLevel, lodFile },
+    };
+
+    // Renaming is OFF by default and deliberately so. Identity lives in
+    // extras.hpAsset, which is additive — a re-ship overwrites the same file
+    // path and the engine swaps the mesh with nothing else to reconcile.
+    // Rewriting scene/node names is not additive: it changes how anything that
+    // keys on those names sees the asset (risking duplicate entries alongside
+    // already-placed instances) and it destroys the original KitBash part name
+    // (KB3D_EVC_BldgMD_C_Main.001 …), which no later pass can recover.
+    // Opt in with --stamp-names only for a fresh import.
+    if (renameNodes) {
+      const nodeName = `${kit}__${asset}__${suffix || `LOD${lodLevel}`}`;
+      for (const scene of json.scenes || []) {
+        scene.name = nodeName;
+        const roots = scene.nodes || [];
+        if (roots.length === 1 && json.nodes?.[roots[0]]) {
+          json.nodes[roots[0]].name = nodeName;
+        }
+      }
+    }
+
+    writeGlbFromJsonAndBin(json, bin, glbPath);
+  } catch (err) {
+    // Non-fatal — metadata is nice-to-have, not pipeline-critical.
+    console.warn(`  meta: hpAsset stamp skipped for ${glbPath} — ${err.message}`);
+  }
+}
 
 /** Normal maps — biggest VRAM eaters; 1024 after BC7 is enough on buildings. */
 const TEX_CAP_NORMAL = 1024;
@@ -86,6 +177,8 @@ export async function processAsset(assetPath, options) {
   const workDir = makeWorkDir(outDir);
   // Opt-in: external URIs into per-kit `_shared/textures/<sha1>.png` (engine resolves vs GLB dir).
   const sharedTextures = options.sharedTextures === true;
+  // Opt-in: also rewrite scene/root-node names. extras.hpAsset is always written.
+  const stampNames = options.stampNames === true;
   const texturesDir = resolveSharedTexturesDir(options.output, stem);
 
   console.log(`\n→ Processing: ${assetPath}`);
@@ -111,6 +204,8 @@ export async function processAsset(assetPath, options) {
     const beforeRaw = collectStats(rawDoc, fileSizeBytes(glbPath));
 
     let atlasUsed = false;
+    /** True when last mesh LOD wrote a self-contained atlas lod2.glb (LOD3 proxy-chain source). */
+    let lod2AtlasOk = false;
     let sourceDoc = await io.read(glbPath);
 
     // 1) Material merge (no rebake) — always; keeps tiling for lod0/lod1
@@ -158,6 +253,13 @@ export async function processAsset(assetPath, options) {
     } else {
       await io.write(defaultPath, sourceDoc);
     }
+    // default.glb is the engine's close-up file, so it carries identity too —
+    // named DEFAULT rather than LOD0 so it stays distinguishable from lod0.glb.
+    stampLodMetadata(defaultPath, stem, 0, {
+      lodFileName: 'default.glb',
+      suffix: 'DEFAULT',
+      renameNodes: stampNames,
+    });
     console.log(`  default  : ${defaultPath} (${fileSizeBytes(defaultPath)} bytes)`);
 
     // Impostor MUST bake from PNG/JPEG — Puppeteer has no KTX2 transcoder.
@@ -233,7 +335,7 @@ export async function processAsset(assetPath, options) {
 
       const isLastLod = i === ratios.length - 1;
       const wantLod2Atlas = isLastLod && i >= 1 && options.lod2Atlas !== false;
-      let lod2AtlasOk = false;
+      let thisLod2AtlasOk = false;
 
       if (i === 0) {
         // Always write PNG-capable lod0_embedded for impostor bake.
@@ -247,8 +349,10 @@ export async function processAsset(assetPath, options) {
             lod0Shared.files,
           );
           await writeGlbPreservingExternalImages(io, pubDoc, lodPath, workDir);
+          stampLodMetadata(lodPath, stem, i, { renameNodes: stampNames });
         } else {
           await io.write(lodPath, doc);
+          stampLodMetadata(lodPath, stem, i, { renameNodes: stampNames });
           await io.write(embedLod0, doc);
         }
         // Puppeteer has no KTX2 transcoder — re-simplify from PNG working copy.
@@ -302,6 +406,8 @@ export async function processAsset(assetPath, options) {
             blender: options.blender,
           });
           lod2AtlasOk = true;
+          thisLod2AtlasOk = true;
+          stampLodMetadata(lodPath, stem, i, { renameNodes: stampNames });
         } catch (err) {
           console.warn(`  ${label}: atlas skipped — ${err.message}`);
           if (err.stack) console.warn(err.stack);
@@ -310,6 +416,7 @@ export async function processAsset(assetPath, options) {
             `  ${label}: stripped ${strippedCount} textures (geometry-only fallback)`,
           );
           await io.write(lodPath, doc);
+          stampLodMetadata(lodPath, stem, i, { renameNodes: stampNames });
         }
       } else {
         // LOD1 (and lod2 if --no-lod2-atlas): geometry-only stubs
@@ -318,6 +425,7 @@ export async function processAsset(assetPath, options) {
           `  ${label}: stripped ${strippedCount} textures (geometry-only, material name stubs kept)`,
         );
         await io.write(lodPath, doc);
+        stampLodMetadata(lodPath, stem, i, { renameNodes: stampNames });
       }
 
       if (options.bake && i === 0) {
@@ -341,7 +449,7 @@ export async function processAsset(assetPath, options) {
         }
       }
 
-      const statsDoc = lod2AtlasOk ? await io.read(lodPath) : doc;
+      const statsDoc = thisLod2AtlasOk ? await io.read(lodPath) : doc;
       const stats = collectStats(statsDoc, fileSizeBytes(lodPath));
       const health = assessHealth(beforeGeom, stats, ratio);
       // Count glass after simplify (before atlas merges materials away).
@@ -353,39 +461,59 @@ export async function processAsset(assetPath, options) {
         path: lodPath,
         stats,
         health,
-        baked: lod2AtlasOk,
-        atlas: lod2AtlasOk,
+        baked: thisLod2AtlasOk,
+        atlas: thisLod2AtlasOk,
         glassTris: glassAfterSimplify.tris,
         glassPrims: glassAfterSimplify.prims,
         reduction: reductionReport(beforeGeom, stats),
         // Embedded lod0 kept for diagnostics / fallback
         embedPath: i === 0 ? pathJoin(workDir, 'lod0_embedded.glb') : null,
       });
-      if (lod2AtlasOk) atlasUsed = true;
+      if (thisLod2AtlasOk) atlasUsed = true;
     }
 
     // 5) LOD3 slicecards — silhouette slice stack + box-projected ortho atlas
-    //    (MASK; falls back to 6-quad AABB boxcards when extraction fails)
+    //    Silhouette comes from full-detail geometry (the base-plate heuristic is
+    //    per-object and lod2.glb is one joined mesh), appearance from lod2.glb so
+    //    the look inherits structurally — Simplygon/UE proxy chain.
     let lod3Info = null;
     if (options.lod3Silhouette !== false) {
-      const lod3Source = existsSync(impostorSourceGlb)
-        ? impostorSourceGlb
-        : existsSync(defaultPath)
-          ? defaultPath
-          : null;
+      const lod2Path = pathJoin(outDir, 'lod2.glb');
+      let lod3Source = null;
+      let lod3SourceKind = null;
+      if (existsSync(impostorSourceGlb)) {
+        lod3Source = impostorSourceGlb;
+        lod3SourceKind = 'embedded';
+      } else if (existsSync(defaultPath)) {
+        lod3Source = defaultPath;
+        lod3SourceKind = 'default';
+      }
+      const lod3Look =
+        lod2AtlasOk && existsSync(lod2Path) ? lod2Path : null;
       if (!lod3Source) {
         console.warn('  LOD3: skipped — no bake source GLB');
       } else {
+        if (!lod3Look) {
+          console.warn(
+            '  LOD3: no lod2 atlas — appearance falls back to source (lod2↔lod3 pop expected)',
+          );
+        }
         const lod3Res = options.lod3Res ?? 2048;
         try {
           lod3Info = await bakeLod3Silhouette({
             inputGlb: lod3Source,
+            appearanceGlb: lod3Look,
             outDir,
             workDir,
             resolution: lod3Res,
             blender: options.blender,
           });
+          lod3Info.source = lod3SourceKind;
+          lod3Info.appearanceSource = lod3Info.photographedLook
+            ? 'lod2-atlas'
+            : lod3SourceKind;
           const lod3Path = lod3Info.outputGlb;
+          stampLodMetadata(lod3Path, stem, 3, { renameNodes: stampNames });
           const stats = collectStats(await io.read(lod3Path), fileSizeBytes(lod3Path));
           lodResults.push({
             label: 'LOD3',
@@ -405,7 +533,12 @@ export async function processAsset(assetPath, options) {
         } catch (err) {
           console.warn(`  LOD3: skipped — ${err.message}`);
           if (err.stack) console.warn(err.stack);
-          lod3Info = { ok: false, reason: err.message };
+          lod3Info = {
+            ok: false,
+            reason: err.message,
+            source: lod3SourceKind,
+            appearanceSource: lod3Look ? 'lod2-atlas' : lod3SourceKind,
+          };
         }
       }
     }
@@ -544,6 +677,17 @@ export async function processAsset(assetPath, options) {
       }
     }
 
+    const albedoPop = await compareLod2Lod3Albedo(outDir);
+    if (albedoPop) {
+      const deltaPct = (albedoPop.deltaRatio * 100).toFixed(1);
+      console.log(
+        `  albedo QC: lod2 luma ${albedoPop.lod2Mean.toFixed(3)} | ` +
+          `lod3 luma ${albedoPop.lod3Mean.toFixed(3)} | ` +
+          `Δ ${deltaPct}%` +
+          `${albedoPop.warn ? ' ⚠ pop risk' : ''}`,
+      );
+    }
+
     const report = {
       name: stem,
       source: assetPath,
@@ -553,9 +697,11 @@ export async function processAsset(assetPath, options) {
         ratios,
         lod2Atlas: options.lod2Atlas !== false,
         atlasUsed,
+        lod2AtlasOk,
         lod3Silhouette: options.lod3Silhouette !== false,
         lod3Res: options.lod3Res ?? 2048,
         lod3Method: lod3Info?.backend || 'boxcards',
+        lod3Source: lod3Info?.source || null,
         hero: !!options.hero,
         ktx2: options.ktx2 !== false,
         impostor: options.impostor,
@@ -564,6 +710,7 @@ export async function processAsset(assetPath, options) {
         maxTexture: options.maxTexture,
       },
       lod3: lod3Info,
+      albedoPop,
       beforeRaw,
       before: beforeGeom,
       materialMerge: mergeStats,
@@ -621,6 +768,42 @@ export async function processAsset(assetPath, options) {
 
 function createIO() {
   return new NodeIO().registerExtensions(ALL_EXTENSIONS);
+}
+
+/**
+ * Compare albedo brightness lod2 vs lod3 (pop metric). Warn when |Δ| > 20%.
+ *
+ * Compares OPAQUE-pixel means only. The all-pixel mean is dominated by empty
+ * atlas space, and the two layouts differ structurally: LOD2 is a watlas pack
+ * with an asset-dependent fill rate, while LOD3's 3×2 grid always leaves ~33%
+ * of a square atlas unused (3×⌊N/3⌋ by 2×⌊N/3⌋). Using it would report a large
+ * delta for two perfectly matched atlases.
+ *
+ * @param {string} outDir
+ */
+async function compareLod2Lod3Albedo(outDir) {
+  const lod2Albedo = pathJoin(outDir, 'lod2_atlas', 'albedo.png');
+  const lod3Albedo = pathJoin(outDir, 'lod3_atlas', 'albedo.png');
+  if (!existsSync(lod2Albedo) || !existsSync(lod3Albedo)) return null;
+  try {
+    const a = await albedoStatsPng(lod2Albedo);
+    const b = await albedoStatsPng(lod3Albedo);
+    const base = Math.max(a.meanLuminanceOpaque, 1e-6);
+    const deltaRatio = (b.meanLuminanceOpaque - a.meanLuminanceOpaque) / base;
+    return {
+      lod2Mean: a.meanLuminanceOpaque,
+      lod3Mean: b.meanLuminanceOpaque,
+      lod2NearBlackRatio: a.nearBlackRatio,
+      lod3NearBlackRatio: b.nearBlackRatio,
+      lod2OpaqueRatio: a.opaqueRatio,
+      lod3OpaqueRatio: b.opaqueRatio,
+      deltaRatio,
+      warn: Math.abs(deltaRatio) > 0.2,
+    };
+  } catch (err) {
+    console.warn(`  albedo QC: skipped — ${err.message}`);
+    return null;
+  }
 }
 
 /**
@@ -953,6 +1136,8 @@ function writeAssetJson(outDir, stem, lodResults, impostorInfo, extra = {}) {
         resolution: lod3Info.resolution ?? null,
         backend: lod3Info.backend || 'boxcards',
         slices: lod3Info.slices ?? 0,
+        source: lod3Info.source || null,
+        appearanceSource: lod3Info.appearanceSource || null,
         alphaMode: lod3Info.alphaMode || 'MASK',
       };
     }

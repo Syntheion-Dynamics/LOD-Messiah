@@ -85,15 +85,41 @@ TOOL/
 ├── legacy/                   # starý impostor + Blender hull (default OFF)
 ├── docs/                     # handoffy + tato dokumentace
 ├── gallery/                  # lokální web náhled (není runtime hry)
+├── cook-ui/                  # lokální UI: výběr kitů + LODů k pečení
 ├── Kitbash Assets/           # vstup (gitignore)
 ├── output/                   # výstup cooku (gitignore)
 ├── convert-kitbash.bat       # 1 budova
 ├── convert-kitbash-all.bat   # celý kit / batch
+├── cook-ui.bat               # UI picker (port 4174)
 ├── rebake-lod3-kitbash.bat   # jen LOD3 znovu
 └── ship-to-engine.bat        # kopie do engine Assets
 ```
 
 CLI entry: `npm run convert` → `src/cli.js` → `processAsset` / `processBatch` v `pipeline.js`.
+
+### Cook UI (výběr kitů + LODů)
+
+Spouštění:
+
+```bat
+cook-ui.bat
+rem nebo: npm run cook-ui  →  http://127.0.0.1:4174
+```
+
+UI vylistuje složky pod `Kitbash Assets/` (kity). Checkboxy:
+
+| Checkbox | Co dělá |
+|----------|---------|
+| **LOD0 / LOD1** | Spustí plný `npm run convert` pro vybrané kity (`--only`) |
+| **LOD2-atlas** | Stejný convert **s** atlas bake (bez checkboxu → `--no-lod2-atlas`) |
+| **LOD3** | S convertem: `--lod3-silhouette`; **samotný** LOD3 → `npm run rebake:lod3 -- --force` |
+
+Mapování:
+
+- jen LOD3 → `rebake:lod3` (rychlé, potřebuje už uvařený lod2 atlas / default)
+- LOD0/1 a/nebo LOD2-atlas → `convert --kits-root "./Kitbash Assets" --only A,B …`
+
+Jeden job najednou; log se polluje v prohlížeči.
 
 ---
 
@@ -124,7 +150,8 @@ KTX2 (default ON v CLI; baty pro engine: --no-ktx2)
     │      • LOD1 = geometry-only (textury z LOD0 ve hře)
     │      • LOD2 = geo-only NEBO unique UV + atlas (default atlas ON)
     │
-    ├─► LOD3 slicecards      — Puppeteer + Three.js (viz §5)
+    ├─► LOD2 atlas           — watlas + Blender; glass → opaque sky proxy před EMIT bake
+    ├─► LOD3 slicecards      — Puppeteer; zdroj preferuje lod2.glb (proxy-chain)
     │      • fallback → 6-quad AABB boxcards
     │
     └─► legacy impostor      — jen s --impostor (default OFF)
@@ -178,9 +205,9 @@ Engine: opaque pass + `discard` pod cutoff; **zachovat alpha** (BC7, ne BC1); u 
 Běží v headless Chromiu (Puppeteer) + Three.js; Node pak sestaví GLB přes glTF-Transform.
 
 ```text
-1) 6 ortho „fotek“ plného meshe (±X ±Y ±Z)
+1) 6 ortho „fotek“ (preferovaně z **lod2.glb** atlasu — stejné pixely skla/fasády)
       → atlas 3×2, default 2048 px, pad 8 px
-      → RGBA, A = coverage (pro MASK)
+      → RGBA, A = coverage (pro MASK); albedo gain **1.0** (žádné ×1.45)
 
 2) Top-down heightmapa všech trojúhelníků
       → per-pixel max world Y (stěny = edges, plochy = barycentric fill)
@@ -190,7 +217,7 @@ Běží v headless Chromiu (Puppeteer) + Three.js; Node pak sestaví GLB přes g
 
 4) Per band:
       coverage mask → morph close → flood-fill interior
-      → exterior contours → Douglas–Peucker zjednodušení
+      → exterior contours → **radiální fit** (válec) pre-DP, jinak Douglas–Peucker
 
 5) Geometrie (slicecards):
       per contour per band = prism

@@ -1,0 +1,68 @@
+<!DOCTYPE html>
+<html lang="cs">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Cook UI — kit + LOD picker</title>
+  <link rel="stylesheet" href="/styles.css" />
+</head>
+<body>
+  <div class="app">
+    <header>
+      <div>
+        <h1>Cook UI</h1>
+        <p>Vyber kity z <code>Kitbash Assets</code> a LODy k pečení. Jen vybrané — ne všechno.</p>
+      </div>
+      <div class="header-meta" id="meta">Načítám kity…</div>
+    </header>
+
+    <div class="grid">
+      <section class="panel">
+        <div class="panel-head">
+          <h2>Kity</h2>
+          <div class="row-actions">
+            <button type="button" id="kitsAll">Zaškrtnout všechny</button>
+            <button type="button" id="kitsNone" class="ghost">Zrušit</button>
+          </div>
+        </div>
+        <div class="checks" id="kits"></div>
+      </section>
+
+      <section class="panel">
+        <div class="panel-head">
+          <h2>LODy</h2>
+          <div class="row-actions">
+            <button type="button" id="lodsAll">Zaškrtnout všechny</button>
+            <button type="button" id="lodsNone" class="ghost">Zrušit</button>
+          </div>
+        </div>
+        <div class="checks lods">
+          <label><input type="checkbox" id="lod0" /> LOD0 <span class="hint">(convert)</span></label>
+          <label><input type="checkbox" id="lod1" /> LOD1 <span class="hint">(convert)</span></label>
+          <label><input type="checkbox" id="lod2Atlas" checked /> LOD2-atlas <span class="hint">(Blender atlas + sklo)</span></label>
+          <label><input type="checkbox" id="lod3" checked /> LOD3 <span class="hint">(contour / slicecards)</span></label>
+        </div>
+        <p class="note">
+          Jen <strong>LOD3</strong> → rychlý <code>rebake:lod3</code>.<br />
+          LOD0 / LOD1 / LOD2-atlas → plný <code>convert</code> vybraných kitů.
+        </p>
+        <div class="jobs-row">
+          <label for="jobs">Jobs</label>
+          <input id="jobs" type="number" min="1" max="16" value="4" />
+        </div>
+        <button type="button" class="primary" id="cook">Cook selected</button>
+        <div class="status" id="status">Připraveno.</div>
+      </section>
+    </div>
+
+    <section class="panel log-panel">
+      <div class="panel-head">
+        <h2>Log</h2>
+        <button type="button" class="ghost" id="clearLog">Vymazat pohled</button>
+      </div>
+      <pre id="log" class="log"></pre>
+    </section>
+  </div>
+  <script type="module" src="/app.js"></script>
+</body>
+</html>

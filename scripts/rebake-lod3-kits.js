@@ -1,8 +1,7 @@
 #!/usr/bin/env node
 /**
- * Rebake LOD3 slicecards (silhouette slice stack; boxcards fallback) from default.glb (parallel jobs).
- * Walks Kitbash Assets kits; prefers cooked output/<Kit>/<Asset>/default.glb,
- * falls back to the source .glb when default is missing.
+ * Rebake LOD3 slicecards (silhouette slice stack; boxcards fallback).
+ * Prefers lod2.glb (atlas proxy-chain) when present, else default.glb / kitbash source.
  *
  *   npm run rebake:lod3 -- --force
  *   npm run rebake:lod3 -- --force --jobs 2 Manhattan
@@ -63,7 +62,13 @@ const JOBS = Math.max(
 const kits = kitFilter.length ? kitFilter : DEFAULT_KITS;
 
 /**
- * @typedef {{ kit: string, asset: string, outDir: string, sourceGlb: string, sourceLabel: string }} Job
+ * @typedef {object} Job
+ * @property {string} kit
+ * @property {string} asset
+ * @property {string} outDir
+ * @property {string} sourceGlb   geometry / silhouette source (full detail)
+ * @property {string} sourceLabel
+ * @property {string|null} lookGlb  appearance source (lod2.glb) or null
  */
 
 /** @returns {Job[]} */
@@ -85,6 +90,8 @@ function listJobs() {
     for (const file of glbs) {
       const asset = basename(file, '.glb');
       const outDir = join(OUTPUT, kit, asset);
+      const cookedLod2 = join(outDir, 'lod2.glb');
+      const lod2AtlasAlbedo = join(outDir, 'lod2_atlas', 'albedo.png');
       const cookedDefault = join(outDir, 'default.glb');
       const sourceKit = join(kitDir, file);
 
@@ -95,14 +102,30 @@ function listJobs() {
       // resolve ../_shared/ from a temp work dir. Prefer KitBash source (embedded).
       const assetJsonPath = join(outDir, 'asset.json');
       let sharedTextures = false;
+      let lod2HasAtlas = existsSync(lod2AtlasAlbedo);
       if (existsSync(assetJsonPath)) {
         try {
           const aj = JSON.parse(readFileSync(assetJsonPath, 'utf8'));
           sharedTextures = aj.sharedTextures === true;
+          const lod2Entry = Array.isArray(aj.lods)
+            ? aj.lods.find((l) => l.level === 2)
+            : null;
+          if (lod2Entry?.atlas) lod2HasAtlas = true;
         } catch {
           sharedTextures = false;
         }
       }
+
+      // Proxy-chain: LOD3 inherits its APPEARANCE from the LOD2 atlas, but its
+      // silhouette still comes from full-detail geometry — lod2.glb is a single
+      // joined mesh and the baker's base-plate heuristic is per-object, so using
+      // it for geometry would grow a solid slab under every building.
+      const lookGlb =
+        lod2HasAtlas &&
+        existsSync(cookedLod2) &&
+        statSync(cookedLod2).size >= MIN_DEFAULT_BYTES
+          ? cookedLod2
+          : null;
 
       if (
         !sharedTextures &&
@@ -129,7 +152,8 @@ function listJobs() {
         continue;
       }
 
-      jobs.push({ kit, asset, outDir, sourceGlb, sourceLabel });
+      if (lookGlb) sourceLabel += ' + lod2 look';
+      jobs.push({ kit, asset, outDir, sourceGlb, sourceLabel, lookGlb });
     }
   }
 
@@ -196,7 +220,7 @@ console.log(
   `KitBash LOD3 boxcards rebake — ${allJobs.length} asset(s), ${RESOLUTION}px, jobs=${JOBS} (cpu=${cpuCount})`,
 );
 console.log(`  kits: ${kits.join(', ')}`);
-console.log(`  prefer: output\\<Kit>\\<Asset>\\default.glb  (fallback: Kitbash .glb)`);
+console.log(`  geometry: default.glb → Kitbash .glb | appearance: lod2.glb when cooked`);
 if (!allJobs.length) {
   console.log('Nothing to do.');
   process.exit(0);
@@ -227,6 +251,7 @@ await mapPool(allJobs, JOBS, async (job) => {
   try {
     const result = await bakeLod3Silhouette({
       inputGlb: job.sourceGlb,
+      appearanceGlb: job.lookGlb,
       outDir: job.outDir,
       workDir,
       resolution: RESOLUTION,
@@ -236,6 +261,7 @@ await mapPool(allJobs, JOBS, async (job) => {
       resolution: result.resolution,
       backend: result.backend,
       source: job.sourceLabel,
+      appearanceSource: result.photographedLook ? 'lod2-atlas' : job.sourceLabel,
     });
     console.log(`OK ${rel} — ${result.triangles} tris (${result.backend})`);
     ok++;

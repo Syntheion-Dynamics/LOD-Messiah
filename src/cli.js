@@ -41,6 +41,7 @@ Multi-kit:
   --no-impostor           Explicit off (default)
   --max-texture N         Cap basecolor/emissive; normal/ORM capped at 1024
   --pack                  Also write legacy pack.glb (off by default)
+  --stamp-names           Also rename scene/root nodes (OFF: only extras.hpAsset)
   --shared-textures       Kit _shared/textures/ + external URIs (engine-ready)
   --no-shared-textures    Embed textures in lod0 (DEFAULT off; bats enable shared)
   --jobs N / -j N         Parallel assets (default 1; kitbash-all uses 7)
@@ -66,6 +67,7 @@ function parseArgs(argv) {
     maxTexture: null,
     pack: false,
     sharedTextures: false,
+    stampNames: false,
     blender: null,
     gltfpack: null,
     toktx: null,
@@ -204,6 +206,12 @@ function parseArgs(argv) {
       case '--no-pack':
         args.pack = false;
         break;
+      case '--stamp-names':
+        args.stampNames = true;
+        break;
+      case '--no-stamp-names':
+        args.stampNames = false;
+        break;
       case '--shared-textures':
         args.sharedTextures = true;
         break;
@@ -249,6 +257,7 @@ function buildOptions(args, inputRoot, outputDir) {
     maxTexture: args.maxTexture,
     pack: args.pack,
     sharedTextures: args.sharedTextures,
+    stampNames: args.stampNames,
     blender: args.blender,
     gltfpack: args.gltfpack,
     toktx: args.toktx,

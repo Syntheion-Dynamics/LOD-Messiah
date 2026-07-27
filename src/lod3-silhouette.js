@@ -44,8 +44,23 @@ const MARGIN = 1.02;
 const FACE_ORDER = ['px', 'nx', 'py', 'ny', 'pz', 'nz'];
 
 /**
+ * Two sources, on purpose:
+ *
+ *   inputGlb      — geometry. Drives the AABB, the ground-plate heuristic and
+ *                   the height-slice contours.
+ *   appearanceGlb — what the six ortho cameras photograph. Point this at
+ *                   lod2.glb so LOD3 inherits LOD2's baked look pixel for
+ *                   pixel (Simplygon/UE proxy chain) instead of re-deriving it
+ *                   in a second renderer with its own colour pipeline.
+ *
+ * Keeping them separate matters: lod2.glb is a single joined mesh, and
+ * computeAABB()'s base-plate detection is per-object, so running the silhouette
+ * off lod2 would silently disable exclude-ground and grow a solid slab under
+ * every building. Both models share world space, so one AABB frames both.
+ *
  * @param {object} options
- * @param {string} options.inputGlb
+ * @param {string} options.inputGlb geometry / silhouette source
+ * @param {string} [options.appearanceGlb] photo source (default: inputGlb)
  * @param {string} options.outDir
  * @param {string} options.workDir
  * @param {number} [options.resolution] atlas edge px (default 2048)
@@ -58,6 +73,7 @@ const FACE_ORDER = ['px', 'nx', 'py', 'ny', 'pz', 'nz'];
 export async function bakeLod3Silhouette(options) {
   const {
     inputGlb,
+    appearanceGlb = null,
     outDir,
     workDir,
     resolution = 2048,
@@ -67,6 +83,15 @@ export async function bakeLod3Silhouette(options) {
 
   if (!existsSync(inputGlb)) {
     throw new Error(`LOD3 input missing: ${inputGlb}`);
+  }
+  const lookGlb =
+    appearanceGlb && existsSync(appearanceGlb) && appearanceGlb !== inputGlb
+      ? appearanceGlb
+      : null;
+  if (appearanceGlb && !lookGlb && appearanceGlb !== inputGlb) {
+    console.warn(
+      `  LOD3: appearance source missing (${appearanceGlb}) — photographing geometry source`,
+    );
   }
 
   const atlasSize = Math.max(512, Number(resolution) || 2048);
@@ -81,11 +106,14 @@ export async function bakeLod3Silhouette(options) {
 
   console.log(
     `  LOD3: slicecards bake — atlas ${atlasSize}px 3×2, pad=${pad}px` +
-      `${excludeGround ? ', exclude-ground' : ''} from ${inputGlb}`,
+      `${excludeGround ? ', exclude-ground' : ''}\n` +
+      `        geometry   : ${inputGlb}\n` +
+      `        appearance : ${lookGlb ?? '(same as geometry)'}`,
   );
 
   const bake = await runBoxcardsBake({
     inputGlb,
+    lookGlb,
     workDir,
     atlasSize,
     pad,
@@ -171,7 +199,9 @@ export async function bakeLod3Silhouette(options) {
 
   console.log(
     `  LOD3: OK — ${Math.round(tris)} tris, ${backend}, MASK, atlas ${atlasSize}px` +
-      ` (${(statSync(albedoPath).size / 1024).toFixed(0)} KB)`,
+      ` (${(statSync(albedoPath).size / 1024).toFixed(0)} KB)` +
+      `${bake.photographedLook ? ', appearance from proxy chain' : ''}` +
+      `${bake.excludedGround ? ', ground excluded' : ''}`,
   );
 
   return {
@@ -187,12 +217,17 @@ export async function bakeLod3Silhouette(options) {
     padding: pad,
     center: bake.center,
     size: bake.size,
+    // Did the six photos actually come from the proxy-chain source, or did the
+    // baker fall back to the geometry model? The pop fix depends on the former.
+    photographedLook: !!bake.photographedLook,
+    excludedGround: !!bake.excludedGround,
     boundariesY: bake.slices?.boundaries ?? [],
   };
 }
 
 async function runBoxcardsBake({
   inputGlb,
+  lookGlb = null,
   workDir,
   atlasSize,
   pad,
@@ -216,11 +251,20 @@ async function runBoxcardsBake({
   const inner = Math.max(1, cell - 2 * pad);
 
   const stagedGlb = join(workDir, '_lod3_source.glb');
+  const stagedLookGlb = lookGlb ? join(workDir, '_lod3_look.glb') : null;
   const bakeHtml = join(workDir, '_lod3_bake.html');
   copyFileSync(inputGlb, stagedGlb);
+  if (stagedLookGlb) copyFileSync(lookGlb, stagedLookGlb);
   writeFileSync(
     bakeHtml,
-    buildBakerHtml({ atlasSize, cell, pad, inner, excludeGround }),
+    buildBakerHtml({
+      atlasSize,
+      cell,
+      pad,
+      inner,
+      excludeGround,
+      hasLookModel: !!stagedLookGlb,
+    }),
   );
 
   const mime = {
@@ -240,6 +284,8 @@ async function runBoxcardsBake({
         filePath = bakeHtml;
       } else if (url.pathname === '/model.glb') {
         filePath = stagedGlb;
+      } else if (url.pathname === '/look.glb' && stagedLookGlb) {
+        filePath = stagedLookGlb;
       } else if (url.pathname.startsWith('/vendor/three/')) {
         filePath = join(threeRoot, url.pathname.slice('/vendor/three/'.length));
       } else if (url.pathname === '/favicon.ico') {
@@ -325,6 +371,7 @@ async function runBoxcardsBake({
 
     try {
       rmSync(stagedGlb, { force: true });
+      if (stagedLookGlb) rmSync(stagedLookGlb, { force: true });
       rmSync(bakeHtml, { force: true });
     } catch {
       // ignore
@@ -332,6 +379,7 @@ async function runBoxcardsBake({
 
     return {
       atlasBytes,
+      photographedLook: !!data.photographedLook,
       center: data.center,
       size: data.size,
       atlasSize: data.atlasSize,
@@ -348,7 +396,14 @@ async function runBoxcardsBake({
   }
 }
 
-function buildBakerHtml({ atlasSize, cell, pad, inner, excludeGround }) {
+function buildBakerHtml({
+  atlasSize,
+  cell,
+  pad,
+  inner,
+  excludeGround,
+  hasLookModel = false,
+}) {
   return `<!DOCTYPE html>
 <html><head><meta charset="utf-8"/><title>lod3 slicecards</title></head>
 <body style="margin:0;background:#000">
@@ -371,6 +426,7 @@ const cell = ${cell};
 const pad = ${pad};
 const inner = ${inner};
 const excludeGround = ${excludeGround ? 'true' : 'false'};
+const hasLookModel = ${hasLookModel ? 'true' : 'false'};
 const margin = ${MARGIN};
 const ss = 2;
 const renderSize = Math.max(64, inner * ss);
@@ -415,25 +471,15 @@ fill.position.set(-4, 2, -2);
 scene.add(fill);
 
 function prepareMaterials(root) {
+  // Albedo-attribute bake (gain 1.0). Engine lights LOD3 at runtime like LOD2.
+  // Do NOT multiply colors or bake a lit pass — that double-lights and pops vs lod2.
+  // Glass: when source is lod2 atlas, panes are already opaque proxy pixels — pass through.
   root.traverse((obj) => {
     if (!obj.isMesh || !obj.material) return;
     const list = Array.isArray(obj.material) ? obj.material : [obj.material];
     const next = list.map((mat) => {
       if (!mat) return mat;
-      const name = (mat.name || obj.name || '').toLowerCase();
-      const isGlass = /glass|window|curtainwall/.test(name);
-      if (isGlass) {
-        return new THREE.MeshBasicMaterial({
-          color: new THREE.Color(0xb4d0e8),
-          transparent: true,
-          opacity: 0.92,
-          side: mat.side ?? THREE.FrontSide,
-          depthWrite: true,
-          toneMapped: false,
-        });
-      }
       const color = mat.color ? mat.color.clone() : new THREE.Color(0xffffff);
-      color.multiplyScalar(1.45);
       const basic = new THREE.MeshBasicMaterial({
         color,
         map: mat.map || null,
@@ -715,11 +761,19 @@ function extractSlices(root, box, size, center) {
     const polysPx = traceComponents(mask, W, coverCount);
     const polys = [];
     for (const contour of polysPx) {
-      let eps = 2.0;
-      let simple = simplifyClosed(contour, eps);
-      while (simple.length > MAX_VERTS_PER_POLY && eps < 16) {
-        eps *= 1.4;
+      // Radial fit BEFORE Douglas–Peucker — DP turns circles into arbitrary
+      // polygons whose perimeter fails circularity tests.
+      const round = regularizeRoundContour(contour);
+      let simple;
+      if (round) {
+        simple = round;
+      } else {
+        let eps = 2.0;
         simple = simplifyClosed(contour, eps);
+        while (simple.length > MAX_VERTS_PER_POLY && eps < 16) {
+          eps *= 1.4;
+          simple = simplifyClosed(contour, eps);
+        }
       }
       if (simple.length < 3) continue;
       polys.push(
@@ -733,6 +787,51 @@ function extractSlices(root, box, size, center) {
   }
 
   return { bands, boundaries, coverCount };
+}
+
+/**
+ * If contour is nearly circular, replace with a regular N-gon.
+ * Squares fail (~41% radial deviation); octagons fail (~8%); cylinders pass.
+ *
+ * Contour coords are GRID pixels here (pre world-space mapping), so the
+ * tolerance carries an absolute floor as well: a Moore trace on a 256 grid
+ * staircases by ~1px, which on a small footprint (r ≈ 10px) is already 7% and
+ * would reject an otherwise perfect cylinder on quantisation noise alone.
+ *
+ * @param {Array<[number, number]>} contour
+ * @returns {Array<[number, number]>|null}
+ */
+function regularizeRoundContour(contour) {
+  if (!contour || contour.length < 8) return null;
+  let cx = 0;
+  let cz = 0;
+  for (const [x, z] of contour) {
+    cx += x;
+    cz += z;
+  }
+  cx /= contour.length;
+  cz /= contour.length;
+  const radii = contour.map(([x, z]) => Math.hypot(x - cx, z - cz));
+  const rBar = radii.reduce((a, b) => a + b, 0) / radii.length;
+  if (rBar < 1e-3) return null;
+  // Measured max |r − r̄| on densely traced outlines (GRID px):
+  //   circle r=40 0.55 · r=20 0.39 · r=10 0.34   (pure rounding noise, flat in r)
+  //   12-gon 1.27 · octagon r=40 2.03 · r=20 1.01 · hexagon 3.72   (grows with r)
+  // A relative bound alone rejects small circles (r=10 is already 3.4%); an
+  // absolute one alone accepts large octagons. Both together separate cleanly,
+  // and the safe failure direction is rejecting — a bumpy cylinder just keeps
+  // its DP polygon, whereas circularising a rectangular tower is very visible.
+  let maxDev = 0;
+  for (const r of radii) maxDev = Math.max(maxDev, Math.abs(r - rBar));
+  if (maxDev >= Math.max(0.045 * rBar, 0.8)) return null;
+
+  const n = 20;
+  const out = [];
+  for (let i = 0; i < n; i++) {
+    const a = (i / n) * Math.PI * 2;
+    out.push([cx + Math.cos(a) * rBar, cz + Math.sin(a) * rBar]);
+  }
+  return out;
 }
 
 function rasterEdge(ax, az, ay, bx, bz, by, paint) {
@@ -929,11 +1028,35 @@ function dpSimplify(pts, eps) {
 const camera = new THREE.OrthographicCamera(-1, 1, 1, -1, 0.05, 100000);
 
 try {
-  const gltf = await new GLTFLoader().loadAsync('/model.glb');
-  prepareMaterials(gltf.scene);
-  scene.add(gltf.scene);
+  const loader = new GLTFLoader();
 
-  const { box, size, center, excludedGround } = computeAABB(gltf.scene);
+  // Geometry model: AABB, ground-plate heuristic, height-slice contours.
+  // It is never added to the render scene — only measured.
+  const geomGltf = await loader.loadAsync('/model.glb');
+  geomGltf.scene.updateWorldMatrix(true, true);
+
+  // Appearance model: the only thing the six ortho cameras see. Falls back to
+  // the geometry model when no separate look source was staged.
+  let lookRoot = geomGltf.scene;
+  let photographedLook = false;
+  if (hasLookModel) {
+    try {
+      const lookGltf = await loader.loadAsync('/look.glb');
+      lookRoot = lookGltf.scene;
+      photographedLook = true;
+    } catch (e) {
+      console.error('LOD3 look model failed, photographing geometry: ' + (e && e.message ? e.message : e));
+      lookRoot = geomGltf.scene;
+    }
+  }
+
+  prepareMaterials(lookRoot);
+  scene.add(lookRoot);
+
+  // Frame from the GEOMETRY AABB even when photographing the look model — both
+  // share world space, and only the geometry model has the per-object structure
+  // that the base-plate heuristic needs (lod2.glb is one joined mesh).
+  const { box, size, center, excludedGround } = computeAABB(geomGltf.scene);
 
   for (let fi = 0; fi < faces.length; fi++) {
     const face = faces[fi];
@@ -990,13 +1113,14 @@ try {
 
   let slices = null;
   try {
-    slices = extractSlices(gltf.scene, box, size, center);
+    slices = extractSlices(geomGltf.scene, box, size, center);
   } catch (err) {
     console.error('LOD3 slice extraction failed: ' + (err && err.message ? err.message : err));
   }
 
   window.__BOXCARDS__ = {
     ok: true,
+    photographedLook,
     atlas: atlasCanvas.toDataURL('image/png'),
     center: { x: center.x, y: center.y, z: center.z },
     size: { x: size.x, y: size.y, z: size.z },
