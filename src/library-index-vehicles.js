@@ -152,6 +152,22 @@ function assessVehicleFindings(asset, glbFiles, hasVehicleJson) {
     }
   }
 
+  // Mirrors the suspicious_axis rule in vehicle-inventory.js: a body taller
+  // than it is long is either mis-rotated or carrying stray geometry. Only
+  // meaningful on world bounds — on accessor bounds this fired on every car
+  // whose root node holds the rotation, which is a third of them.
+  if (asset.dims_m) {
+    const { x, y, z } = asset.dims_m;
+    if (y > Math.max(x, z)) {
+      findings.push({
+        code: 'podezrela_osa',
+        severity: 'warn',
+        message: `body je vyšší (${y.toFixed(2)} m) než delší — zkontroluj orientaci`,
+        detail: { dims_m: asset.dims_m },
+      });
+    }
+  }
+
   return findings;
 }
 
