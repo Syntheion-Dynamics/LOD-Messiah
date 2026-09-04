@@ -16,7 +16,9 @@
     "ship": "node scripts/ship-to-engine.js",
     "smoke": "node src/cli.js --input ./input --output ./output --max-texture 2048 --ratio 0.5 --no-impostor --no-ktx2",
     "gallery": "node src/gallery-server.js",
-    "cook-ui": "node src/cook-ui-server.js"
+    "cook-ui": "node src/cook-ui-server.js",
+    "library:scan": "node src/library-index.js",
+    "library:scan:source": "node src/library-index.js --with-source"
   },
   "engines": {
     "node": ">=20"
